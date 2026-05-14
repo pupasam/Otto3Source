@@ -42,7 +42,7 @@ void loop() {
   delay(3000);
   SolenoidLoop();
   delay(3000);
-  //RunPumpLine(WASH, 8, 5);
+  RunPumpLine(WASH, 8, 5);
   delay(3000);
   stopLoop();
   stopLoop();
