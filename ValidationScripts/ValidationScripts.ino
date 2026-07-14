@@ -1,6 +1,6 @@
-#include </Users/kirbybry/Documents/Arduino/OttoFns/constants.ino>
-#include </Users/kirbybry/Documents/Arduino/OttoFns/LowLevelFns.ino>
-#include </Users/kirbybry/Documents/Arduino/OttoFns/OttoFns.ino>
+#include "src/constants.h"
+#include "src/LowLevelFns.h"
+#include "src/OttoFns.h"
 
 void ReagentLoop() {
   for (int i=1; i<9; i++) {

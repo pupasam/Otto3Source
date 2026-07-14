@@ -1,9 +1,9 @@
 // Post-run shutdown script for Otto3
 // all reagent slots should be loaded with water reservoirs
 
-#include </Users/kirbybry/Documents/Otto3/OttoFns/constants.ino>
-#include </Users/kirbybry/Documents/Otto3/OttoFns/LowLevelFns.ino>
-#include </Users/kirbybry/Documents/Otto3/OttoFns/OttoFns.ino>
+#include "src/constants.h"
+#include "src/LowLevelFns.h"
+#include "src/OttoFns.h"
 
 void loop() {
 

@@ -59,10 +59,30 @@ int getReagentPort(Reagent r) {
   }
 }
 
+// Pump and solenoid stay on plain GPIO (they are NOT I2C valves).
 int SolenoidPin = 32;
 int PumpPin = 33;
-int ReagentPins[4] = {36, 37, 38, 39};
-int VacuumPins[4] = {42, 43, 44, 45};
-int SamplePins[4] = {48, 49, 50, 51};
+
+// ---- I2C selector-valve addressing (RheoLink / IDEX MX Series II) ----------
+// The three selector valves are now driven over I2C instead of 4-bit BCD GPIO.
+// Each value below is the 7-bit I2C address as printed by the i2c_scanner sketch.
+//
+// IMPORTANT: every valve must be given its own UNIQUE even 8-bit write address
+// BEFORE it goes on the shared bus, using the address_change sketch, one valve
+// at a time, followed by a power-cycle:
+//     factory 0x0E  -> 7-bit 0x07   (reagent, as shipped)
+//            0x10   -> 7-bit 0x08   (sample)
+//            0x12   -> 7-bit 0x09   (vacuum)
+// If you only have one addressed valve on the bench, temporarily point all three
+// constants at the same address to exercise the code path.
+uint8_t ReagentValveAddr7 = 0x07;
+uint8_t SampleValveAddr7  = 0x08;
+uint8_t VacuumValveAddr7  = 0x09;
+
+// MX Series II is a 10-position selector; ports are 1..10.
+const uint8_t VALVE_POS_MIN = 1;
+const uint8_t VALVE_POS_MAX = 10;
+// I2C bus speed. MUST be 100 kHz — 1 MHz hangs the RheoLink bus.
+const uint32_t VALVE_I2C_HZ = 100000;
 
 

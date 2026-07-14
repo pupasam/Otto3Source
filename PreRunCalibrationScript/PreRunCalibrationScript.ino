@@ -2,9 +2,9 @@
 // all reagent slots should be loaded with PR2 reservoirs
 // manifold should be loaded onto empty, unseeded test plate
 
-#include </Users/kirbybry/Documents/Otto3/OttoFns/constants.ino>
-#include </Users/kirbybry/Documents/Otto3/OttoFns/LowLevelFns.ino>
-#include </Users/kirbybry/Documents/Otto3/OttoFns/OttoFns.ino>
+#include "src/constants.h"
+#include "src/LowLevelFns.h"
+#include "src/OttoFns.h"
 
 void loop() {
 

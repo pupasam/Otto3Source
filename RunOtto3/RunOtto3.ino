@@ -1,6 +1,6 @@
-#include </Users/kirbybry/Documents/Otto3/OttoFns/constants.ino>
-#include </Users/kirbybry/Documents/Otto3/OttoFns/LowLevelFns.ino>
-#include </Users/kirbybry/Documents/Otto3/OttoFns/OttoFns.ino>
+#include "src/constants.h"
+#include "src/LowLevelFns.h"
+#include "src/OttoFns.h"
 
 // for testing, insert this line to stop the loop at that point: stopLoop();
 
