@@ -10,9 +10,11 @@ The port was done **at the seam** — only the three `Select*Port()` wrappers we
 reimplemented. Every higher-level routine (`RunPumpLine`, aspirate/dispense,
 calibration, `runAutomation`, etc.) calls those wrappers unchanged.
 
-> **Status: compile-checked only, NOT hardware-verified.** All five sketches
-> compile clean for `arduino:avr:mega`. No valve has been actuated by this
-> firmware. See "What could NOT be validated" below.
+> **Status: hardware-verified 2026-08-03.** All five sketches compile clean for
+> **both** `arduino:mbed_giga:giga` and `arduino:avr:mega`. All three valves are
+> addressed and actuated over I²C from this driver: **270 moves, zero failures**,
+> including round-robin across the fleet and with the solenoid interleaved.
+> See "Open risks" below — protocol timing is the live one.
 
 ---
 
@@ -58,9 +60,10 @@ constants at the same address to exercise the code path.
   their **exact signatures** but now call
   `valve.set_position(port, true, RheoLink_TIMEOUT)`.
 
-### `OttoFns/RheoLink.h`, `OttoFns/RheoLink.cpp` (new)
-- Copied verbatim from `ValveControl/firmware/OttoValve/` (K. Marx's unchanged
-  lab driver). This is the canonical copy for the firmware.
+### `OttoFns/RheoLink.h`, `OttoFns/RheoLink.cpp`
+- Originally K. Marx's lab driver, now **modified** — see "Why the driver goes
+  quiet during a move" and "Bounded retry loops" below. `ValveControl/firmware/`
+  carries the same modified copy; keep the two in step.
 
 ### Sketch folders (`RunOtto3/`, `ValidationScripts/`, `OneTimeCalibrationScript/`, `PreRunCalibrationScript/`, `ShutdownScript/`)
 - Each `*.ino` previously `#include`d OttoFns via **hard-coded absolute paths**
@@ -103,14 +106,14 @@ The 12 valve GPIO pins are freed: reagent **36–39**, vacuum **42–45**, sampl
 
 Consequence: the instrument no longer needs a Mega's high pin count *for the
 valves*, and the bus scales to more valves by address instead of by 4 more pins
-per valve. (The compile target here is still `arduino:avr:mega` only because
-pump/solenoid live on pins 32/33, which a Uno does not have. Move those two to
-Uno-range pins and the whole thing fits a 5 V Uno — the controller the RheoLink
-bring-up was verified on.)
+per valve. (All five sketches build for **both** `arduino:mbed_giga:giga` — the controller
+actually in use — and `arduino:avr:mega`. Pump/solenoid live on pins 32/33, which
+a Uno does not have; move those two to Uno-range pins and the whole thing would
+fit a 5 V Uno as well.)
 
 ---
 
-## Hardware steps still required (not done here)
+## Bring-up procedure (completed 2026-08-03 — repeat for valves 4-6)
 
 1. **Assign a unique even 8-bit address to each valve** with the
    `address_change` sketch, **one valve at a time**, power-cycling after each:
@@ -128,26 +131,48 @@ bring-up was verified on.)
 
 ---
 
-## What could NOT be validated without hardware
+## Open risks
 
-- **No valve was actuated** by this firmware. Only compilation is verified.
-- **Timing behavior changed.** BCD `SelectPort()` was an instantaneous
-  `digitalWrite`. `set_position(..., wait_for_completion=true, ...)` now
-  **blocks** until the valve confirms the position (or times out at
-  `RheoLink_TIMEOUT` = 2000 ms). Routines that assumed near-instant port
-  switching and hand-tuned the surrounding `delay()`s (e.g. `RunPumpLine`'s
-  `delay(20)/delay(30)`, the tight aspirate/dispense loops in
-  `AddSBSReagentMulti`) may need **re-tuning against a wall clock**, since valve
-  moves now consume real, variable time inside those sequences. This is the
-  top open risk.
+- **Protocol timing is the live risk.** BCD `SelectPort()` was an instantaneous
+  `digitalWrite`. A valve move now takes a **measured ~723 ms** end to end: the
+  travel itself is ~276 ms, plus `RheoLink_QUIET_MS` (600 ms) during which the
+  driver must not touch the bus (see below), plus confirmation. Routines that
+  hand-tuned the surrounding `delay()`s around near-instant port switching
+  (`RunPumpLine`'s `delay(20)/delay(30)`, the tight aspirate/dispense loops in
+  `AddSBSReagentMulti`) need **re-tuning against a wall clock**. Nothing about
+  the fluidics has been timed yet.
 - **Error handling is fire-and-forget.** The wrappers ignore the `uint8_t`
-  return of `set_position()` to preserve the `void Select*Port(int)` signatures.
-  A failed/timed-out move will not halt the protocol. Consider adding a checked
-  variant before unattended runs.
-- **Address assignment is unverified** — the mapping above is the intended plan;
-  the `address_change` step must actually be performed and confirmed on the
-  bench.
-- **Port range:** the protocol uses ports 1–8 (`VentPort`/`SafeVacB` = 8), well
-  within 1–10. BCD previously clamped out-of-range ports to a default; RheoLink
-  instead **rejects** a port outside 1–10 (returns code 11 and does not move).
+  return of `set_position()` to preserve the `void Select*Port(int)` signatures,
+  so a failed move will not halt the protocol. This matters more now that we
+  know moves *can* fail and that a failure is silent — add a checked variant
+  before any unattended run.
+- **Six-valve build untested.** Valves 4-6 are not built or addressed, and the
+  24 V 6 A supply covers three with headroom but wants 8 A for six.
+
+## Bounded retry loops
+
+Both retry loops in the original driver spun forever: at `retry_count == max`
+they stopped incrementing while the loop condition still passed, so a
+persistently failing command locked the CPU at full speed with no delay. That —
+not `Wire` blocking — was the "hang" that froze unrelated GPIO, leaving pump and
+solenoid in whatever state they held. Both loops now `break`, so every driver
+call is bounded and returns.
+
+## Why the driver goes quiet during a move
+
+A valve NACKs every I²C transaction while it is physically travelling. Polling it
+through that window makes its I²C interface stop acknowledging its own address
+for 30-60 s — reproducible on all three valves after 9-14 consecutive moves, with
+no valve fault code reported. `set_position()` therefore stays silent for
+`RheoLink_QUIET_MS` after issuing a move, then confirms at `RheoLink_POLL_MS`
+intervals. Do not reduce the quiet period to speed up moves without re-running
+the stress test.
+
+## Verified on the bench
+
+- Addresses `0x07` (reagent), `0x08` (sample), `0x09` (vacuum) all answer and
+  move; assignment persists across power-down.
+- **Port range:** the protocol uses ports 1-8 (`VentPort`/`SafeVacB` = 8), well
+  within 1-10. BCD previously clamped out-of-range ports to a default; RheoLink
+  instead **rejects** a port outside 1-10 (returns code 11 and does not move).
   No current call passes >10, but this is a behavior change to be aware of.
