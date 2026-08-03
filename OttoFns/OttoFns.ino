@@ -241,7 +241,7 @@ void testSampleRuntime(int SampleWells[], float SampleLineTotalVolume, float mLP
 
 // will dispense 4mL total into sample well plate, then aspirate; runs 2X
 //conduct first with bleach water then pure water
-fullRinse(int WellLength, int SampleWells[], float mLPumpTime) {
+void fullRinse(int WellLength, int SampleWells[], float mLPumpTime) {
   
   RunPumpLine(WASH, 8, mLPumpTime);
   

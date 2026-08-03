@@ -135,7 +135,7 @@ uint8_t RheoLink::begin(TwoWire &w, uint8_t address, uint8_t p_min, uint8_t p_ma
   DEPENDENCIES: Wire.h
   -----------------------------------------------------------------------------
 */
-uint8_t RheoLink::send_command(RheoLinkCommand_t cmd, uint8_t data ) {
+uint8_t RheoLink::send_command(RheoLinkCommand_t cmd, uint8_t data, uint8_t max_retries ) {
   uint8_t checksum;
   uint8_t err;
   uint8_t retry_count = 0;
@@ -143,7 +143,7 @@ uint8_t RheoLink::send_command(RheoLinkCommand_t cmd, uint8_t data ) {
   if (!init_){
     return 22;
   }
-  
+
   // Retry loop for robust communication
   do {
     checksum = address_ << 1;
@@ -157,23 +157,30 @@ uint8_t RheoLink::send_command(RheoLinkCommand_t cmd, uint8_t data ) {
 
     err = w_->endTransmission(true);
 
-    // there's a problem with the firmware on the selector valve - open and close a dummy transmission to terminate the command
-    w_->beginTransmission(0);
-    w_->endTransmission();
-
     // If successful, break out of retry loop
     if (err == 0) {
+      // There's a problem with the firmware on the selector valve - open and
+      // close a dummy transmission to terminate the command. This only makes
+      // sense after a command the valve actually ACKed; firing it after a
+      // failed attempt just adds another broadcast to a bus that is already
+      // struggling. Note address 0 is the I2C general call, so every valve on
+      // the shared bus sees it -- harmless with one valve, worth keeping to a
+      // minimum with three.
+      w_->beginTransmission(0);
+      w_->endTransmission();
       break;
     }
 
     // If we have retries left, wait and try again
-    if (retry_count < RheoLink_MAX_RETRIES) {
+    if (retry_count < max_retries) {
       delay(RheoLink_RETRY_DELAY);
       retry_count++;
+    } else {
+      break;
     }
 
-  } while (retry_count <= RheoLink_MAX_RETRIES);
-  
+  } while (true);
+
   return err;
 }
 
@@ -204,12 +211,12 @@ uint8_t RheoLink::send_command(RheoLinkCommand_t cmd, uint8_t data ) {
   DEPENDENCIES: Wire.h
   -----------------------------------------------------------------------------
 */
-uint8_t RheoLink::read_register(RheoLinkCommand_t target){
+uint8_t RheoLink::read_register(RheoLinkCommand_t target, uint8_t max_retries){
   if (!init_){
     return 22;
   }
-  
-  uint8_t err = this->send_command(target);
+
+  uint8_t err = this->send_command(target, RheoLink_DUMMY_DATA, max_retries);
 
   // If there was a problem connecting, return an error
   if(err != 0){
@@ -229,13 +236,17 @@ uint8_t RheoLink::read_register(RheoLinkCommand_t target){
       break;
     }
 
-    // If we have retries left, wait and try again
-    if (retry_count < RheoLink_MAX_RETRIES) {
+    // If we have retries left, wait and try again. The trailing else is load
+    // bearing: without it, retry_count sticks at max_retries while the loop
+    // condition still passes, and this spins forever with no delay.
+    if (retry_count < max_retries) {
       delay(RheoLink_RETRY_DELAY);
       retry_count++;
+    } else {
+      break;
     }
 
-  } while (retry_count <= RheoLink_MAX_RETRIES);
+  } while (true);
 
   // If we didn't get any data after all retries, return an error
   if(bytes_received == 0){
@@ -282,12 +293,14 @@ uint8_t RheoLink::block_until_done(uint32_t timeout){
     return 22;
   }
   
-  uint8_t err = this->read_register(RheoLink_STATUS);
+  // Single-attempt reads, same reasoning as block_until_position_reached():
+  // this loop is the retry mechanism, so send_command must not retry underneath it.
+  uint8_t err = this->read_register(RheoLink_STATUS, 0);
   uint32_t t0 = millis();
   while((err < 40) and (err >=30) and ((millis() - t0) < timeout)){
     // If error is 30 - 39 AND we didn't time out yet, wait a bit and get the error again
-    delay(5);
-    err = this->read_register(RheoLink_STATUS);
+    delay(RheoLink_POLL_MS);
+    err = this->read_register(RheoLink_STATUS, 0);
   }
   return err;
 }
@@ -328,21 +341,43 @@ uint8_t RheoLink::block_until_done(uint32_t timeout){
 */
 uint8_t RheoLink::block_until_position_reached(uint8_t pos, uint32_t timeout){
 
-  uint8_t current_pos = this->read_register(RheoLink_STATUS);
   uint32_t t0 = millis();
 
   while((millis() - t0) < timeout){
-    // If we got the target position, return success
-    if(current_pos == pos){
+    // max_retries = 0: single attempt, no retry storm. The valve NACKs by
+    // design while it is physically moving, so a NACK here is expected and
+    // this loop is already the retry mechanism. Letting send_command retry
+    // underneath meant every poll fired six failed transactions plus six
+    // general-call broadcasts; a few moves of that wedges the bus hard enough
+    // that only a 24 V power-cycle of the valves clears it.
+    uint8_t s = this->read_register(RheoLink_STATUS, 0);
+
+    // Arrived.
+    if(s == pos){
       return 0;
     }
-    // If other position is reported, return an error
-    if(current_pos > pos_max){
-      return 1;
+
+    // 30-39 means read_register could not complete the I2C transaction
+    // (it returns 30 + the send_command error). The valve NACKs the bus while
+    // it is physically moving, so this is BUSY, not a failure -- keep waiting.
+    // Treating it as a hard error was the original bug: it made this function
+    // bail on the very first poll, which made set_position() re-issue the whole
+    // move command up to 4 times. Every one of those NACKed transactions burns
+    // a full Wire timeout, so an 11 ms valve move took ~12 s to report.
+    if(s >= 30 && s <= 39){
+      delay(RheoLink_POLL_MS);
+      continue;
     }
-    // Wait a bit and check position again
-    delay(5);
-    current_pos = this->read_register(RheoLink_STATUS);
+
+    // A different *valid* position means the valve is still travelling.
+    if(s >= pos_min && s <= pos_max){
+      delay(RheoLink_POLL_MS);
+      continue;
+    }
+
+    // Anything else is a genuine fault (22 not-initialised, 66/77/99 valve
+    // faults, ...). Report it rather than spinning until the timeout.
+    return s;
   }
 
   // If we timed out, return timeout error
@@ -395,29 +430,33 @@ uint8_t RheoLink::set_position(uint8_t pos, bool wait_for_completion, uint32_t t
     return 11; // Position out of range error
   }
 
-  uint8_t err;
-  uint8_t retry_count = 0;
-  uint8_t MAX_RETRIES = 3;
+  // Issue the move ONCE. The original code re-sent this command inside a retry
+  // loop whenever the confirmation wait returned non-zero, which re-commanded a
+  // valve that was already moving. It also never broke out of that loop when
+  // wait_for_completion was false, so a fire-and-forget move was sent 4 times.
+  uint8_t err = this->send_command(RheoLink_POS, pos);
+  if (err != 0) {
+    return err;
+  }
 
-  do {
-    // Send the position command
-    err = this->send_command(RheoLink_POS, pos);
+  if (!wait_for_completion) {
+    return 0;
+  }
 
-    // If there was an error sending the command, return it
-    if (err != 0) {
-      return err;
-    }
+  // Say nothing while it travels. See RheoLink_QUIET_MS -- talking to a valve
+  // mid-move is what killed its I2C interface, not anything about the wiring.
+  delay(RheoLink_QUIET_MS);
 
-    // If requested, wait for the valve to reach the specific position
-    if (wait_for_completion) {
-        err = this->block_until_position_reached(pos, timeout);
-        if (err == 0)
-          break;
-    }
+  uint8_t err2 = this->block_until_position_reached(pos, timeout);
 
-    retry_count++;
-
-  } while (retry_count <= MAX_RETRIES);
-
-  return err;
+  // Short settle before returning. The valve keeps disturbing the shared bus
+  // for a moment after it reports the new position, and a transaction issued
+  // immediately afterwards -- even one addressed to a DIFFERENT valve -- can
+  // stall. Measured: back-to-back moves with no gap stall; with this settle
+  // they run clean. 25 ms is nothing next to the ~20 ms the move itself takes,
+  // and callers no longer have to know about this.
+  if (err2 == 0) {
+    delay(25);
+  }
+  return err2;
 }

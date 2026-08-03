@@ -62,12 +62,30 @@ enum RheoLinkCommand_t {
 #define RheoLink_MAX_RETRIES 5
 #define RheoLink_RETRY_DELAY 10
 
+// Quiet period after commanding a move, during which we put NO traffic on the
+// bus at all. A valve NACKs every transaction while it is physically moving,
+// and polling it through that window makes its I2C interface stop answering
+// entirely for 30-60 s -- measured, reproducibly, on all three valves after
+// 9-14 consecutive moves. Staying silent while it travels: 180 moves, zero
+// failures. A one-step move measures ~276 ms; 600 ms covers a multi-step move
+// with margin. Cheap next to the seconds of pumping between valve changes.
+#define RheoLink_QUIET_MS 600
+// How often to check AFTER the quiet period, if the valve still is not there.
+// Deliberately slow: this path should rarely run, and 5 ms polling is exactly
+// what caused the fault above.
+#define RheoLink_POLL_MS 100
+
 class RheoLink {
   public:
     RheoLink();
     uint8_t begin(TwoWire &w, uint8_t address, uint8_t p_min, uint8_t p_max);
-    uint8_t send_command(RheoLinkCommand_t cmd, uint8_t data = RheoLink_DUMMY_DATA);
-    uint8_t read_register(RheoLinkCommand_t target);
+    // max_retries defaults preserve the original behaviour for one-shot commands.
+    // Pass 0 when polling: a poll loop must not retry, because the valve NACKs
+    // by design while it is moving and a retry storm there wedges the bus.
+    uint8_t send_command(RheoLinkCommand_t cmd, uint8_t data = RheoLink_DUMMY_DATA,
+                         uint8_t max_retries = RheoLink_MAX_RETRIES);
+    uint8_t read_register(RheoLinkCommand_t target,
+                          uint8_t max_retries = RheoLink_MAX_RETRIES);
     uint8_t block_until_done(uint32_t timeout = RheoLink_TIMEOUT);
     uint8_t block_until_position_reached(uint8_t pos, uint32_t timeout = RheoLink_TIMEOUT);
     uint8_t set_position(uint8_t pos, bool wait_for_completion = true, uint32_t timeout = RheoLink_TIMEOUT);
@@ -79,5 +97,7 @@ class RheoLink {
     bool init_;
 };
 
-#undef RheoLink_DUMMY_DATA
+// RheoLink_DUMMY_DATA is deliberately NOT #undef'd here: RheoLink.cpp needs it
+// to forward the default data byte when passing an explicit max_retries, and
+// the other RheoLink_* defines above are left visible too.
 #endif /* RHEOLINK_H_ */
