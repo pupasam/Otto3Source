@@ -1,6 +1,28 @@
-// Pre-run test scripts for Otto3
-// all reagent slots should be loaded with PR2 reservoirs
-// manifold should be loaded onto empty, unseeded test plate
+// ============================================================================
+// Otto3 — Pre-run calibration & checkout (single entry point)
+// ============================================================================
+// HOW TO USE
+//   Exactly ONE step line is uncommented at a time. Flash, watch, re-comment,
+//   move on. The GIGA RESET button re-runs the flashed step. Each step runs
+//   once per boot, then stopLoop() parks the instrument safe (pump stopped,
+//   vacuum solenoid closed).
+//
+// SETUP (before any step)
+//   - All reagent slots loaded with PR2; lines reach the reservoir bottoms.
+//   - Manifold on an EMPTY, UNSEEDED test plate (Step 5 is later repeated on
+//     a cell-seeded plate).
+//   - Wall vacuum open, trap flask in line, 12 V solenoid supply on.
+//   - Pump: after ANY manual keypad use, press the front-panel STOP key once —
+//     remote control only arms after STOP, and the keypad locks out while the
+//     remote contact is closed.
+//   - Power sequence: GIGA powered BEFORE pump power on; pump power off FIRST
+//     at shutdown — an unpowered GIGA drives the pump remote input low (=RUN).
+//
+// CALIBRATED VALUES live in src/constants.h (a symlink to
+// ../../OttoFns/constants.ino — one edit propagates to every sketch):
+//   mLPumpTime, vacTime, SampleLineVolume, SampleNeedleVolume,
+//   ReagentLineVolume, adjustSampleVolMicro
+// ============================================================================
 
 #include "src/constants.h"
 #include "src/LowLevelFns.h"
@@ -8,31 +30,82 @@
 
 void loop() {
 
-  //stopLoop();stopLoop();
+  // --------------------------------------------------------------------------
+  // STEP 1 — prime the three reagent lines (reagent valve -> pump -> vent 8).
+  // PASS: line draws for the full run; flow out the vent is bubble-free.
+  // Repeat passes (reset) until clean — ~2 min total priming per line.
+  // --------------------------------------------------------------------------
+  //RunPumpLine(WASH, 8, 20);          // Step 1.1 — wash line
+  //RunPumpLine(CLEAVAGE, 8, 20);      // Step 1.2 — cleavage line
+  //RunPumpLine(INCORPORATION, 8, 20); // Step 1.3 — incorporation line
 
-  //RunPumpLine(WASH, 8, 20); //Step 1.1, prime wash line
-  //RunPumpLine(CLEAVAGE, 8, 20); //Step 1.2, prime cleavage line
-  //RunPumpLine(INCORPORATION, 8, 20); //Step 1.3, prime incorporation line
+  // --------------------------------------------------------------------------
+  // STEP 2 — prime ALL lines end to end (~18 min): dispenses each reagent
+  // through every sample line into the plate, aspirating between rounds.
+  // The IMAGE rounds intentionally pull air (empty port 4) — not a fault.
+  // This is also THE FLUSH CYCLE: run it with fresh reservoirs to change the
+  // working fluid (ShutdownScript reuses it with water).
+  // AFTER THIS STEP: empty the test plate before Step 3.
+  // --------------------------------------------------------------------------
+  //fullRinse(WellLength, SampleWells, mLPumpTime);
 
-  //fullRinse(WellLength, SampleWells, mLPumpTime); //Step 2, prime all lines
+  // --------------------------------------------------------------------------
+  // STEP 3 — dispensation volume calibration. The ONLY value edited is
+  // mLPumpTime in constants (s per mL).
+  // PASS: average dispensation = 1 mL (aim a hair over — the target is just
+  // slightly more than 1 mL) and max well-to-well delta < 50 uL.
+  // Empty the plate, edit+save, re-flash, repeat. A fresh or rested pump line
+  // DRIFTS until it softens — trust a value only after two consecutive passes
+  // at the same setting agree. Weighing the plate beats eyeballing.
+  // --------------------------------------------------------------------------
+  //DispenseLines(WellLength, SampleWells, WASH, mLPumpTime);
 
-  //INSTRUCTION: empty out test plate for Step 3
+  // --------------------------------------------------------------------------
+  // STEP 4 — dispense then aspirate the whole plate.
+  // PASS: every well pulled to <= 50 uL (ideally <= 20 uL) remaining.
+  // vacTime in constants = seconds of vacuum per well (7-15 s is sensible;
+  // if 15 s still leaves liquid the problem is suction or needle height,
+  // not time).
+  // --------------------------------------------------------------------------
+  //DispenseLines(WellLength, SampleWells, WASH, mLPumpTime); AspirateLines(WellLength, VacuumWells, vacTime, SafeVacA, SafeVacB, fillTime);
 
-  //DispenseLines(WellLength, SampleWells,WASH,mLPumpTime); //Step 3, assess & calibrate dispensation volume
+  // --------------------------------------------------------------------------
+  // STEP 5 — nested aspirate/dispense cycle + incubation wrapper: the motion
+  // profile of a real run (aspirates well N while dispensing well N-1).
+  // Run first on the unseeded plate for general vacuum performance, then
+  // REPEAT ON A CELL-SEEDED PLATE (cells change the glass surface):
+  // <= 20 uL/well remaining after aspirations, and ~1 mL left per well at the
+  // end — this step finishes wet; that is the incubation state.
+  // --------------------------------------------------------------------------
+  //AspirateDispenseNestedWellsIncubation(WellLength, SampleWells, VacuumWells, WASH, 1, mLPumpTime, mLPumpTime, SafeVacA, SafeVacB, fillTime, 0, 1);
 
-  //INSTRUCTION: total delta between well dispensation volumes should be <50uL
-  //INSTRUCTION: empty plate and re-run Step 3, altering and saving mLPumpTime in 'constants' each time, until average dispensation = 1mL
-  
-  //DispenseLines(WellLength, SampleWells,WASH,mLPumpTime);AspirateLines(WellLength, VacuumWells,  vacTime, SafeVacA, SafeVacB, fillTime); //Step 4, 
+  // --------------------------------------------------------------------------
+  // STEP 6 — computed constants; no machine run, just edit+save constants:
+  //   6.1  SampleLineVolume   = sample line length x volume-per-inch for the
+  //        tubing ID (0.02" ID = ~5.2 uL/inch).
+  //   6.2  SampleNeedleVolume from the needle gauge chart:
+  //        https://www.hamiltoncompany.com/knowledge-base/article/needle-gauge-chart
+  //        (0.0427 mL = 1.5 inches of 16 gauge).
+  // --------------------------------------------------------------------------
 
-  //AspirateDispenseNestedWellsIncubation(WellLength, SampleWells, VacuumWells, WASH, 1, mLPumpTime, mLPumpTime, SafeVacA, SafeVacB, fillTime, 0, 1); //Step 5
-  //INSTRUCTION: validate general vacuum performance first on unseeded plate, then re-run Step 5 with a cell-seeded test plate for precise assessment
-  //INSTRUCTION: total remaining volume between well dispensation volumes on seeded plate should be <20uL/well
+  // --------------------------------------------------------------------------
+  // STEP 7 — addReagent tuning (runs with incorporation). Re-run repeatedly,
+  // tuning in this order:
+  //   (a) edit+save ReagentLineVolume until the LEADING edge of the air
+  //       bubble disappears into the sample valve BEFORE being split into
+  //       the sample lines;
+  //   (b) then edit+save adjustSampleVolMicro until the LAGGING edge
+  //       disappears into the sample needles at the end of the function.
+  // PASS: ~SBSVolume dispensed to each well after the operation.
+  // --------------------------------------------------------------------------
+  //AddSBSReagent(WellLength, SampleWells, VacuumWells, INCORPORATION, SBSVolume, ReagentLineVolume, SampleLineTotalVolume, VentPort, mLPumpTime, vacTime, airTime, fillTime, SafeVacA, SafeVacB);
 
-  AddSBSReagent(WellLength, SampleWells, VacuumWells, CLEAVAGE, SBSVolume, ReagentLineVolume, SampleLineTotalVolume, VentPort, mLPumpTime, vacTime, airTime, fillTime, SafeVacA, SafeVacB); //Step 6
-  //INSTRUCTION: validate that leading edge of air bubble dissappears into sample valve before being split into sample lines, then lagging end of bubble dissappears into needles at end of sample lines
-  //INSTRUCTION: validate that ~SBSVolume has been dispensed to each well following operation
-  
-  stopLoop();stopLoop();
+  // --------------------------------------------------------------------------
+  // STEP 8 — repeat addReagent with cleavage to validate the tuned values.
+  // Same PASS criteria as Step 7.
+  // --------------------------------------------------------------------------
+  //AddSBSReagent(WellLength, SampleWells, VacuumWells, CLEAVAGE, SBSVolume, ReagentLineVolume, SampleLineTotalVolume, VentPort, mLPumpTime, vacTime, airTime, fillTime, SafeVacA, SafeVacB);
+
+  stopLoop(); stopLoop();
 
 }
