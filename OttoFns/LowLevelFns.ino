@@ -4,6 +4,26 @@
 // This replaces the old 4-bit BCD parallel GPIO valve control.
 #include "RheoLink.h"
 
+// Optional live dashboard on the GIGA Display Shield. The main sketch opts in
+// with `#define OTTO_DISPLAY_ENABLED` before including this file; without it
+// the hooks below compile to no-ops, so avr:mega and display-less GIGA builds
+// are unaffected. OttoDisplay.h master copy lives in ValveControl/firmware/
+// OttoDisplay/ -- keep the OttoFns/ copy in step with it.
+#ifdef OTTO_DISPLAY_ENABLED
+#include "OttoDisplay.h"
+#else
+inline void ottoDisplayBegin() {}
+inline void ottoStepBegin(const char*, unsigned long) {}
+inline void ottoStepEnd() {}
+inline void ottoPanelReagent(int) {}
+inline void ottoPanelSample(int) {}
+inline void ottoPanelVacuumPort(int) {}
+inline void ottoPanelSolenoid(bool) {}
+inline void ottoPanelPump(bool, float) {}
+inline void ottoTick() {}
+inline void ottoShowError(const char*) {}
+#endif
+
 // One RheoLink object per selector valve. Addresses come from constants.ino.
 RheoLink reagentValve;
 RheoLink sampleValve;
@@ -35,6 +55,8 @@ void setup() {
 
   Serial.begin(9600); // Initialize serial communication
 
+  ottoDisplayBegin(); // dashboard up before any valve/pump action
+
   // Selector valves are now on I2C (RheoLink) rather than BCD GPIO.
   initValves();
 
@@ -57,7 +79,15 @@ void setup() {
 }
 
 void Wait(float secs) {
-  delay(secs * 1000);
+  // 100 ms slices instead of one long delay, so the dashboard clock,
+  // progress bar and pump countdown stay live during holds
+  unsigned long total = (unsigned long)(secs * 1000.0f);
+  unsigned long t0 = millis();
+  while (millis() - t0 < total) {
+    unsigned long left = total - (millis() - t0);
+    delay(left < 100 ? left : 100);
+    ottoTick();
+  }
 }
 
 // -------- Selector-valve port selection (I2C / RheoLink) --------------------
@@ -68,36 +98,44 @@ void Wait(float secs) {
 // replacing the old instantaneous digitalWrite of the 4 BCD lines.
 void SelectVacuumPort(int port) {
   vacuumValve.set_position((uint8_t)port, true, RheoLink_TIMEOUT);
+  ottoPanelVacuumPort(port);
 }
 
 void SelectReagentPort(int port) {
   reagentValve.set_position((uint8_t)port, true, RheoLink_TIMEOUT);
+  ottoPanelReagent(port);
 }
 
 void SelectSamplePort(int port) {
   sampleValve.set_position((uint8_t)port, true, RheoLink_TIMEOUT);
+  ottoPanelSample(port);
 }
 
 void StartPump() {
   digitalWrite(PumpPin,0); //pump has pull-up transistor
+  ottoPanelPump(true, -1);
 }
 
 void StopPump() {
   digitalWrite(PumpPin,1);
+  ottoPanelPump(false, 0);
 }
 
 void RunPump(float secs) {
   StartPump();
+  ottoPanelPump(true, secs); // arm the on-screen countdown
   Wait(secs);
   StopPump();
 }
 
 void OpenVacuumLine() {
   digitalWrite(SolenoidPin,1);
+  ottoPanelSolenoid(true);
 }
 
 void CloseVacuumLine() {
   digitalWrite(SolenoidPin,0);
+  ottoPanelSolenoid(false);
 }
 
 // new function name
@@ -105,6 +143,7 @@ void stopLoop(){
   delay(1000);
   CloseVacuumLine();
   StopPump();
+  ottoStepEnd(); // freeze the step timer at the measured duration
   //RunPumpLine(WASH, 1, .001);
   while (true) {};
   }

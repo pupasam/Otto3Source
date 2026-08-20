@@ -24,6 +24,13 @@
 //   ReagentLineVolume, adjustSampleVolMicro
 // ============================================================================
 
+// Live dashboard + step timer on the GIGA Display Shield. Remove the define
+// (or build for a board without ARDUINO_GIGA) to compile display-less; the
+// ottoStep*/ottoPanel* calls then become no-ops.
+#if defined(ARDUINO_GIGA)
+#define OTTO_DISPLAY_ENABLED
+#endif
+
 #include "src/constants.h"
 #include "src/LowLevelFns.h"
 #include "src/OttoFns.h"
@@ -35,9 +42,9 @@ void loop() {
   // PASS: line draws for the full run; flow out the vent is bubble-free.
   // Repeat passes (reset) until clean — ~2 min total priming per line.
   // --------------------------------------------------------------------------
-  //RunPumpLine(WASH, 8, 20);          // Step 1.1 — wash line
-  //RunPumpLine(CLEAVAGE, 8, 20);      // Step 1.2 — cleavage line
-  //RunPumpLine(INCORPORATION, 8, 20); // Step 1.3 — incorporation line
+  //ottoStepBegin("STEP 1.1 PRIME WASH", 20); RunPumpLine(WASH, 8, 20);          // Step 1.1 — wash line
+  //ottoStepBegin("STEP 1.2 PRIME CLV", 20); RunPumpLine(CLEAVAGE, 8, 20);      // Step 1.2 — cleavage line
+  //ottoStepBegin("STEP 1.3 PRIME INC", 20); RunPumpLine(INCORPORATION, 8, 20); // Step 1.3 — incorporation line
 
   // --------------------------------------------------------------------------
   // STEP 2 — prime ALL lines end to end (~18 min): dispenses each reagent
@@ -47,7 +54,7 @@ void loop() {
   // working fluid (ShutdownScript reuses it with water).
   // AFTER THIS STEP: empty the test plate before Step 3.
   // --------------------------------------------------------------------------
-  //fullRinse(WellLength, SampleWells, mLPumpTime);
+  //ottoStepBegin("STEP 2 FULL RINSE", (unsigned long)(61 * mLPumpTime + 2 * fillTime)); fullRinse(WellLength, SampleWells, mLPumpTime);
 
   // --------------------------------------------------------------------------
   // STEP 3 — dispensation volume calibration. The ONLY value edited is
@@ -58,7 +65,7 @@ void loop() {
   // DRIFTS until it softens — trust a value only after two consecutive passes
   // at the same setting agree. Weighing the plate beats eyeballing.
   // --------------------------------------------------------------------------
-  //DispenseLines(WellLength, SampleWells, WASH, mLPumpTime);
+  //ottoStepBegin("STEP 3 DISPENSE", (unsigned long)(WellLength * mLPumpTime)); DispenseLines(WellLength, SampleWells, WASH, mLPumpTime);
 
   // --------------------------------------------------------------------------
   // STEP 4 — dispense then aspirate the whole plate.
@@ -67,7 +74,7 @@ void loop() {
   // if 15 s still leaves liquid the problem is suction or needle height,
   // not time).
   // --------------------------------------------------------------------------
-  //DispenseLines(WellLength, SampleWells, WASH, mLPumpTime); AspirateLines(WellLength, VacuumWells, vacTime, SafeVacA, SafeVacB, fillTime);
+  //ottoStepBegin("STEP 4 DISP+ASP", (unsigned long)(WellLength * (mLPumpTime + vacTime) + fillTime)); DispenseLines(WellLength, SampleWells, WASH, mLPumpTime); AspirateLines(WellLength, VacuumWells, vacTime, SafeVacA, SafeVacB, fillTime);
 
   // --------------------------------------------------------------------------
   // STEP 5 — nested aspirate/dispense cycle + incubation wrapper: the motion
@@ -77,7 +84,7 @@ void loop() {
   // <= 20 uL/well remaining after aspirations, and ~1 mL left per well at the
   // end — this step finishes wet; that is the incubation state.
   // --------------------------------------------------------------------------
-  //AspirateDispenseNestedWellsIncubation(WellLength, SampleWells, VacuumWells, WASH, 1, mLPumpTime, mLPumpTime, SafeVacA, SafeVacB, fillTime, 0, 1);
+  //ottoStepBegin("STEP 5 NESTED CYCLE", (unsigned long)(WellLength * 2 * mLPumpTime + fillTime)); AspirateDispenseNestedWellsIncubation(WellLength, SampleWells, VacuumWells, WASH, 1, mLPumpTime, mLPumpTime, SafeVacA, SafeVacB, fillTime, 0, 1);
 
   // --------------------------------------------------------------------------
   // STEP 6 — computed constants; no machine run, just edit+save constants:
@@ -98,13 +105,13 @@ void loop() {
   //       disappears into the sample needles at the end of the function.
   // PASS: ~SBSVolume dispensed to each well after the operation.
   // --------------------------------------------------------------------------
-  //AddSBSReagent(WellLength, SampleWells, VacuumWells, INCORPORATION, SBSVolume, ReagentLineVolume, SampleLineTotalVolume, VentPort, mLPumpTime, vacTime, airTime, fillTime, SafeVacA, SafeVacB);
+  //ottoStepBegin("STEP 7 ADDREAGENT INC", 0); AddSBSReagent(WellLength, SampleWells, VacuumWells, INCORPORATION, SBSVolume, ReagentLineVolume, SampleLineTotalVolume, VentPort, mLPumpTime, vacTime, airTime, fillTime, SafeVacA, SafeVacB);
 
   // --------------------------------------------------------------------------
   // STEP 8 — repeat addReagent with cleavage to validate the tuned values.
   // Same PASS criteria as Step 7.
   // --------------------------------------------------------------------------
-  //AddSBSReagent(WellLength, SampleWells, VacuumWells, CLEAVAGE, SBSVolume, ReagentLineVolume, SampleLineTotalVolume, VentPort, mLPumpTime, vacTime, airTime, fillTime, SafeVacA, SafeVacB);
+  //ottoStepBegin("STEP 8 ADDREAGENT CLV", 0); AddSBSReagent(WellLength, SampleWells, VacuumWells, CLEAVAGE, SBSVolume, ReagentLineVolume, SampleLineTotalVolume, VentPort, mLPumpTime, vacTime, airTime, fillTime, SafeVacA, SafeVacB);
 
   stopLoop(); stopLoop();
 
