@@ -33,7 +33,10 @@
 //   UTILITIES   - one-off bench actions reusing existing functions only:
 //     2-minute line primes (wash/cleavage/incorporation), FULL RINSE,
 //     DISPENSE 1 mL ALL WELLS, ASPIRATE ALL WELLS, SHUTDOWN FLUSH (water,
-//     per ShutdownScript), PARK VALVES
+//     per ShutdownScript), PARK VALVES, and the static bubble-inspection
+//     cals (CAL: RESET LINE / BUBBLE TO VALVE / BUBBLE TO NEEDLE 1 -
+//     calibrateReagentRuntime / testSampleRuntime park the marker bubble
+//     at a landmark and stop, for still-line inspection)
 //
 // STOP semantics (the safety core): while an action runs, one press on the
 // red STOP column aborts with NO confirmation. The latch makes Wait() return
@@ -158,15 +161,22 @@ static const char* const OTTO_UI_LABEL[] = {
   "ASPIRATE ALL WELLS",
   "SHUTDOWN FLUSH (WATER)",
   "PARK VALVES",
+  // Static bubble-inspection helpers (OttoFns.ino calibrate/test fns): draw
+  // the marker bubble, then STOP with it parked at the landmark so the
+  // operator inspects a still line (the original intended tuning method).
+  "CAL: RESET LINE (WASH PRIME)",
+  "CAL: BUBBLE TO VALVE",
+  "CAL: BUBBLE TO NEEDLE 1",
 };
-#define OTTO_UI_NACT 18
+#define OTTO_UI_NACT 21
 
 // Menu tree: category -> action indices. Submenu cell 0 is BACK, so a
 // category holds at most 9 actions (2x5 grid).
 static const char* const OTTO_CAT_NAME[3] = {"CALIBRATION", "RUN", "UTILITIES"};
 static const uint8_t OTTO_CAT_CAL_A[]  = {0, 1, 2, 3, 4, 5, 6, 7, 8};
 static const uint8_t OTTO_CAT_RUN_A[]  = {9};
-static const uint8_t OTTO_CAT_UTIL_A[] = {10, 11, 12, 13, 14, 15, 16, 17};
+static const uint8_t OTTO_CAT_UTIL_A[] = {10, 11, 12, 13, 14, 15, 16, 17,
+                                          18, 19, 20};
 
 static const uint8_t* ottoCatActs(uint8_t cat, uint8_t& n) {
   switch (cat) {
@@ -194,6 +204,18 @@ static unsigned long ottoActExpectedS(uint8_t i) {
     case 15:                                       // AspirateLines
       return (unsigned long)(WellLength * vacTime + fillTime);
     case 17: return 5;                             // park: 3 valve moves
+    case 18:                                       // wash prime out the vent
+      return (unsigned long)(airTime * 5);
+    case 19: case 20: {                            // bubble-to-landmark cals
+      // air draw + wash chase to the sample valve (calibrateReagentRuntime)
+      float chase = ReagentLineVolume * mLPumpTime - airTime;
+      if (chase < 0) chase = 0;
+      float s = airTime + chase;
+      if (i == 20) {                               // + pause + sample leg
+        s += 3 + SampleLineTotalVolume * mLPumpTime;
+      }
+      return (unsigned long)s;
+    }
     default: return 0;   // steps 8, 9 and the full run have no formula
   }
 }
@@ -230,7 +252,28 @@ static void ottoActRun(uint8_t i) {
     case 15: AspirateLines(WellLength, VacuumWells, vacTime, SafeVacA, SafeVacB, fillTime);
              break;
     case 17: ottoPanelPark(); break;
+    case 18: RunPumpLine(WASH, VentPort, airTime*5); break;  // flush old bubble
+    case 19: calibrateReagentRuntime(ReagentLineVolume, mLPumpTime, airTime, VentPort);
+             break;
+    case 20: testSampleRuntime(SampleWells, SampleLineTotalVolume, mLPumpTime, airTime, VentPort);
+             break;
   }
+}
+
+// Header step label (ottoStepBegin): defaults to the menu label; the two
+// bubble-inspection cals get the short bench names.
+static const char* ottoActStepLabel(uint8_t i) {
+  if (i == 19) return "CAL BUBBLE - VALVE";
+  if (i == 20) return "CAL BUBBLE - NEEDLE";
+  return OTTO_UI_LABEL[i];
+}
+
+// Optional DONE-screen inspection line (amber, under MEASURED): tells the
+// operator exactly where to look while the bubble sits parked.
+static const char* ottoActResultNote(uint8_t i) {
+  if (i == 19) return "INSPECT: BUBBLE FRONT AT SAMPLE VALVE?";
+  if (i == 20) return "INSPECT: BUBBLE TAIL AT NEEDLE 1 TIP?";
+  return nullptr;
 }
 
 // Pre-run checklists, from the calibration script's SETUP banner + README
@@ -246,8 +289,14 @@ static uint8_t ottoActChecklist(uint8_t i, const char** items) {
   switch (i) {
     case 0: case 1: case 2:                       // STEPS 1-3 — prime to vent
     case 10: case 11: case 12:                    // utility 2-minute primes
+    case 18:                                      // CAL reset (wash prime)
       items[0] = OTTO_CK_RES;
       items[1] = OTTO_CK_VENT;
+      items[2] = OTTO_CK_PUMP;
+      return 3;
+    case 19: case 20:                             // bubble-to-landmark cals
+      items[0] = OTTO_CK_RES;                     // (no vacuum: solenoid untouched)
+      items[1] = "PORT 6 (AIR) DRY - NO TUBING";
       items[2] = OTTO_CK_PUMP;
       return 3;
     case 3: case 13:                              // FULL RINSE (step 4 / util)
@@ -479,29 +528,42 @@ static int8_t ottoUiTopHit(int16_t tx, int16_t ty) {
 }
 
 // -------------------------------------------------------------- submenu ----
-// Cell 0 = BACK; cells 1..n = the category's actions.
+// Cell 0 = BACK; cells 1..n = the category's actions. The grid is 2 columns
+// by however many rows the category needs (min 5, so small menus keep the
+// classic 86 px rows; UTILITIES' 12 cells get 6 x 72 px rows).
+static int16_t otto_uiRowH = OTTO_UI_ROW_H;
+static int16_t otto_uiBtnH = OTTO_UI_BTN_H;
+
+static void ottoUiGridFor(uint8_t nCells) {
+  uint8_t rows = (nCells + 1) / 2;
+  if (rows < 5) rows = 5;
+  otto_uiRowH = (OTTO_SCR_H - OTTO_UI_MENU_TOP) / rows;
+  otto_uiBtnH = otto_uiRowH - 8;
+}
+
 static void ottoUiMenuRect(uint8_t cell, int16_t& x, int16_t& y) {
   x = (cell % 2) ? OTTO_UI_COL1_X : OTTO_UI_COL0_X;
-  y = OTTO_UI_MENU_TOP + (cell / 2) * OTTO_UI_ROW_H +
-      (OTTO_UI_ROW_H - OTTO_UI_BTN_H) / 2;
+  y = OTTO_UI_MENU_TOP + (cell / 2) * otto_uiRowH +
+      (otto_uiRowH - otto_uiBtnH) / 2;
 }
 
 static void ottoUiDrawMenu() {
   uint8_t n;
   const uint8_t* acts = ottoCatActs(ottoUiCat, n);
+  ottoUiGridFor(n + 1);
   ottoGfx.fillScreen(OTTO_COL_BG);
   ottoUiTitleBar(OTTO_CAT_NAME[ottoUiCat]);
 
   int16_t x, y;
   ottoUiMenuRect(0, x, y);
-  ottoUiButton(x, y, OTTO_UI_BTN_W, OTTO_UI_BTN_H, "< BACK",
+  ottoUiButton(x, y, OTTO_UI_BTN_W, otto_uiBtnH, "< BACK",
                OTTO_UI_BTN_FILL, OTTO_COL_AMBER, OTTO_COL_AMBER, 3);
 
   for (uint8_t c = 0; c < n; c++) {
     uint8_t a = acts[c];
     ottoUiMenuRect(c + 1, x, y);
     bool full = (a == OTTO_ACT_FULLRUN);
-    ottoUiButton(x, y, OTTO_UI_BTN_W, OTTO_UI_BTN_H, OTTO_UI_LABEL[a],
+    ottoUiButton(x, y, OTTO_UI_BTN_W, otto_uiBtnH, OTTO_UI_LABEL[a],
                  full ? OTTO_UI_BTN_NAVY : OTTO_UI_BTN_FILL, OTTO_COL_FG,
                  full ? OTTO_COL_BLUE : OTTO_COL_GREY, 3);
   }
@@ -511,10 +573,11 @@ static void ottoUiDrawMenu() {
 static int8_t ottoUiMenuHit(int16_t tx, int16_t ty) {
   uint8_t n;
   const uint8_t* acts = ottoCatActs(ottoUiCat, n);
+  ottoUiGridFor(n + 1);
   for (uint8_t cell = 0; cell <= n; cell++) {
     int16_t x, y;
     ottoUiMenuRect(cell, x, y);
-    if (ottoUiIn(tx, ty, x, y, OTTO_UI_BTN_W, OTTO_UI_BTN_H)) {
+    if (ottoUiIn(tx, ty, x, y, OTTO_UI_BTN_W, otto_uiBtnH)) {
       return (cell == 0) ? -2 : (int8_t)acts[cell - 1];
     }
   }
@@ -592,7 +655,7 @@ static void ottoPanelExecute(uint8_t i) {
   ottoStopArmed    = true;    // STOP column is hot from this moment
   ottoTapMute(400);
   otto_needRebuild = true;    // leaving a UI screen: full dashboard rebuild
-  ottoStepBegin(OTTO_UI_LABEL[i], ottoActExpectedS(i));
+  ottoStepBegin(ottoActStepLabel(i), ottoActExpectedS(i));
 
   ottoActRun(i);              // blocking; Wait() slices poll the STOP column
 
@@ -647,6 +710,8 @@ static void ottoUiDrawResult() {
     otto_fmtMMSS(ottoUiMeasuredS, t, sizeof(t));
     snprintf(buf, sizeof(buf), "MEASURED %s", t);
     otto_centerIn(buf, 0, OTTO_SCR_W, 280, 4, OTTO_COL_FG);
+    const char* note = ottoActResultNote(ottoUiSel);
+    if (note) otto_centerIn(note, 0, OTTO_SCR_W, 350, 3, OTTO_COL_AMBER);
     otto_centerIn("TOUCH SCREEN TO RETURN TO MENU", 0, OTTO_SCR_W, 440, 2,
                   OTTO_COL_GREY);
   }

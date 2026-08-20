@@ -15,7 +15,10 @@
 //     UTILITIES   - one-off bench actions reusing existing functions only:
 //                   2-minute line primes, FULL RINSE, DISPENSE 1 mL ALL
 //                   WELLS, ASPIRATE ALL WELLS, SHUTDOWN FLUSH (water
-//                   reservoirs, per ShutdownScript), PARK VALVES
+//                   reservoirs, per ShutdownScript), PARK VALVES, and the
+//                   static bubble-inspection cals (reset line / bubble to
+//                   valve / bubble to needle 1) that park the marker
+//                   bubble at a landmark and stop for inspection
 //   Each submenu has a BACK button (top-left cell).
 //
 //   CONFIRM  - that action's pre-run checklist as tappable checkboxes;
