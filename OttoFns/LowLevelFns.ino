@@ -25,6 +25,7 @@ inline void ottoShowError(const char*) {}
 #define OTTO_CUE_CALM  0
 #define OTTO_CUE_WATCH 1
 inline void ottoCue(const char*, uint8_t) {}
+inline void ottoCueArm(const char*, unsigned long) {}
 inline void ottoCueClear() {}
 #endif
 

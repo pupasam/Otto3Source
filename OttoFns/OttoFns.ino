@@ -318,13 +318,12 @@ void AddSBSReagentMulti(int WellLength, int SampleWells[], int VacuumWells[], Re
 
   RunPumpLine(reagentName, SampleWells[bubbleIdx], pumpTimeBeforeBubbleIdx);
 
-  // cue: the bubble's LEADING edge forms at the reagent valve now and
-  // disappears into the sample (dispensing) valve after ~ventRuntime seconds
-  // of pumping (ReagentLineVolume worth) - Step 8(a) watch window
-  static char otto_cueBuf[44];
-  snprintf(otto_cueBuf, sizeof(otto_cueBuf),
-           "EYES ON DISP VALVE - LEADING EDGE ~%ds", (int)(ventRuntime + 0.5f));
-  ottoCue(otto_cueBuf, OTTO_CUE_WATCH);
+  // cue: the bubble's LEADING edge forms at the reagent valve the moment the
+  // AIR segment below starts, and enters the sample (dispensing) valve after
+  // ~ventRuntime seconds of pumping (ReagentLineVolume worth) - Step 8(a)
+  // watch window. Countdown T-0 = that arrival; screen strobes at T-0.
+  ottoCueArm("EYES ON DISP VALVE - FRONT ARRIVES",
+             (unsigned long)(ventRuntime * 1000.0f));
 
   RunPumpLine(AIR, SampleWells[bubbleIdx], AirTimeBubbleIdx);// + pumpTimeBeforeBubble); //dispense bubble to bubble well
 
@@ -365,10 +364,13 @@ void AddSBSReagentMulti(int WellLength, int SampleWells[], int VacuumWells[], Re
   }
 
   // cue: each purge segment below consumes ~SampleLineTotalVolume, pushing
-  // that line's bubble tail out through its needle - Step 8(b) watch window
-  ottoCue("EYES ON NEEDLES - TRAILING EDGE", OTTO_CUE_WATCH);
-
+  // that line's bubble tail out through its needle - Step 8(b) watch window.
+  // One countdown per needle: T-0 (strobe) = end of that line's segment =
+  // the instant the tail should reach that needle hub.
+  static char otto_cueBuf[36];
   for (int ww=0; ww<WellLength; ww++) {
+    snprintf(otto_cueBuf, sizeof(otto_cueBuf), "RED AT NEEDLE %d", ww + 1);
+    ottoCueArm(otto_cueBuf, (unsigned long)(SamplePrimeRuntime * 1000.0f));
     RunPumpLine(WASH, SampleWells[ww], SamplePrimeRuntime); //purge remainder of sample line
   }
 

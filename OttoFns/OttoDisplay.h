@@ -20,6 +20,10 @@
 //                                                // the footer (CALM = steady
 //                                                // grey/blue info; WATCH =
 //                                                // amber, pulsed by ottoTick)
+//   ottoCueArm("RED AT NEEDLE 3", 6300);         // WATCH banner + live "T-Ns"
+//                                                // countdown; at T-0: triple
+//                                                // full-screen strobe, then
+//                                                // "NOW - HOLD THAT IMAGE"
 //   ottoCueClear();                              // banner off, footer back
 //   ottoShowError("VALVE 2 NOT RESPONDING");     // red takeover; any later
 //                                                // call rebuilds the dashboard
@@ -116,6 +120,8 @@
 // Observation-cue levels (ottoCue).
 #define OTTO_CUE_CALM      0     // informational: no need to watch
 #define OTTO_CUE_WATCH     1     // high attention: amber, pulsing
+#define OTTO_CUE_NOW       2     // internal: solid post-strobe "NOW" banner
+#define OTTO_CUE_STROBE_MS 120   // per-frame strobe duration (x3 frames)
 
 // Panel indices.
 #define OTTO_PAN_REAGENT 0
@@ -170,6 +176,12 @@ static uint8_t       otto_cueLevel     = OTTO_CUE_CALM;
 static char          otto_cueMsg[44]   = "";
 static bool          otto_cuePhase     = false;  // WATCH pulse phase (on/off)
 static unsigned long otto_cueNextPulse = 0;
+
+// Armed cue (ottoCueArm): live T-Ns countdown, strobe at expiry.
+static bool          otto_cueArmed     = false;
+static unsigned long otto_cueFireMs    = 0;      // millis() of T-0
+static long          otto_cueShownT    = -1;     // countdown secs on screen
+static char          otto_cueBase[36]  = "";     // armed text minus " T-Ns"
 
 // Panel origins, indexed by OTTO_PAN_*.
 static const int16_t OTTO_PAN_X[4] = {0, OTTO_PAN_W, 0, OTTO_PAN_W};
@@ -484,6 +496,9 @@ static void otto_drawCue() {
   if (otto_cueLevel == OTTO_CUE_WATCH) {         // pulsing amber
     bg = otto_cuePhase ? OTTO_COL_AMBER : OTTO_COL_BG;
     fg = otto_cuePhase ? OTTO_COL_BG    : OTTO_COL_AMBER;
+  } else if (otto_cueLevel == OTTO_CUE_NOW) {    // solid amber, no pulse
+    bg = OTTO_COL_AMBER;
+    fg = OTTO_COL_BG;
   } else {                                       // steady grey/blue info
     bg = OTTO_COL_HDR;
     fg = OTTO_COL_BLUE;
@@ -575,6 +590,7 @@ static void ottoStepBegin(const char* name, unsigned long expected_s) {
   otto_stepExpected = expected_s;
   otto_pill         = OTTO_PILL_RUNNING;
   otto_cueActive    = false;        // a new step retires any leftover cue
+  otto_cueArmed     = false;        // ...including a pending countdown
   otto_drawStepName();
   otto_drawPill();
   otto_drawFooter();                // fresh 00:00 + empty bar
@@ -611,6 +627,7 @@ static void ottoCue(const char* msg, uint8_t level) {
   otto_cueMsg[sizeof(otto_cueMsg) - 1] = '\0';
   otto_cueLevel     = level;
   otto_cueActive    = true;
+  otto_cueArmed     = false;                     // replaces any countdown
   otto_cuePhase     = true;                      // start on the loud phase
   otto_cueNextPulse = millis() + OTTO_CUE_PULSE_MS;
   otto_drawCue();
@@ -620,9 +637,57 @@ static void ottoCue(const char* msg, uint8_t level) {
 static void ottoCueClear() {
   if (!otto_inited) return;
   otto_rebuildIfNeeded();
+  otto_cueArmed = false;
   if (!otto_cueActive) return;
   otto_cueActive = false;
   otto_drawFooter();
+}
+
+// ---- armed cue: live countdown + strobe at T-0 ------------------------------
+
+// Rebuild otto_cueMsg as "<base> T-Ns" from the time left to T-0.
+static void otto_cueCompose() {
+  long remain = (long)(otto_cueFireMs - millis());
+  long secs   = remain > 0 ? (remain + 999L) / 1000L : 0;
+  otto_cueShownT = secs;
+  snprintf(otto_cueMsg, sizeof(otto_cueMsg), "%s T-%lds", otto_cueBase, secs);
+}
+
+// T-0: triple full-screen strobe (white/amber/white, OTTO_CUE_STROBE_MS
+// each), then a full dashboard rebuild from cached state (the post-error
+// rebuild path), with the banner left on the static "NOW" text until the
+// next ottoCue*/ottoStep* call replaces it.
+static void otto_cueFire() {
+  otto_cueArmed = false;
+  ottoGfx.fillScreen(OTTO_COL_FG);    delay(OTTO_CUE_STROBE_MS);
+  ottoGfx.fillScreen(OTTO_COL_AMBER); delay(OTTO_CUE_STROBE_MS);
+  ottoGfx.fillScreen(OTTO_COL_FG);    delay(OTTO_CUE_STROBE_MS);
+  strncpy(otto_cueMsg, "NOW - HOLD THAT IMAGE", sizeof(otto_cueMsg) - 1);
+  otto_cueMsg[sizeof(otto_cueMsg) - 1] = '\0';
+  otto_cueLevel    = OTTO_CUE_NOW;    // solid amber, not pulsed
+  otto_cueActive   = true;
+  otto_needRebuild = true;            // strobe wiped the layout
+  otto_rebuildIfNeeded();             // redraw dashboard + cue banner
+}
+
+// Precision cue: WATCH-level banner with a live " T-Ns" countdown appended
+// (updated each second by ottoTick), firing in fire_in_ms. At expiry the
+// screen strobes 3x and the banner reads "NOW - HOLD THAT IMAGE" until the
+// next cue/step call. Driven by ottoTick() from Wait()'s 100 ms slices, so
+// T-0 carries up to ~100 ms of jitter. msg <= ~28 chars (room for " T-Ns").
+static void ottoCueArm(const char* msg, unsigned long fire_in_ms) {
+  if (!otto_inited) return;
+  otto_rebuildIfNeeded();
+  strncpy(otto_cueBase, (msg && msg[0]) ? msg : "--", sizeof(otto_cueBase) - 1);
+  otto_cueBase[sizeof(otto_cueBase) - 1] = '\0';
+  otto_cueFireMs    = millis() + fire_in_ms;
+  otto_cueArmed     = true;
+  otto_cueLevel     = OTTO_CUE_WATCH;
+  otto_cueActive    = true;
+  otto_cuePhase     = true;
+  otto_cueNextPulse = millis() + OTTO_CUE_PULSE_MS;
+  otto_cueCompose();
+  otto_drawCue();
 }
 
 // Reagent valve panel: big port digit + reagent name
@@ -713,6 +778,20 @@ static void ottoTick() {
     if (otto_flashUntil[p] && (long)(now - otto_flashUntil[p]) >= 0) {
       otto_flashUntil[p] = 0;
       otto_panelRing(p, OTTO_COL_BORDER);
+    }
+  }
+
+  // Armed cue: refresh the T-Ns countdown each second; strobe at T-0.
+  if (otto_cueActive && otto_cueArmed) {
+    long remain = (long)(otto_cueFireMs - now);
+    if (remain <= 0) {
+      otto_cueFire();               // strobe + full rebuild + NOW banner
+      return;                       // screen is fresh; done this tick
+    }
+    long secs = (remain + 999L) / 1000L;
+    if (secs != otto_cueShownT) {
+      otto_cueCompose();
+      otto_drawCue();
     }
   }
 
