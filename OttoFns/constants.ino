@@ -2,7 +2,7 @@
 
 /////////////////////////// RUNTIME CONSTANTS YOU PROBABLY DO WANT TO EDIT/CHECK
 
-float mLPumpTime = 15.4; // amount of time (secs) required to pump 1 mL
+float mLPumpTime = 18.8; // amount of time (secs) required to pump 1 mL
 
 float ReagentLineVolume = 0.64; // mL required to move an air bubble from the reagent valve to the sample valve
 
@@ -32,7 +32,7 @@ float airTime = 6; // amount of time (secs) for air bubble gap between sensitive
 float fillTime = 5; // amount of time (secs) needed to fully fill vacuum line at sample valve switch following line opening
 
 //vacTime should be between 7-15 seconds
-float vacTime = 12;//10.5; // amount of time (secs) required to fully aspirate a well of maximum input volume
+float vacTime = 15;//10.5; // amount of time (secs) required to fully aspirate a well of maximum input volume
 
 float SBSVolume = 0.99; // mL to dispense per well for SBS reagents // it will have SBSVolume - SampleNeedleVolume sitting in it for ~1min
 
