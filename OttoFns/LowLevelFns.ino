@@ -22,6 +22,10 @@ inline void ottoPanelSolenoid(bool) {}
 inline void ottoPanelPump(bool, float) {}
 inline void ottoTick() {}
 inline void ottoShowError(const char*) {}
+#define OTTO_CUE_CALM  0
+#define OTTO_CUE_WATCH 1
+inline void ottoCue(const char*, uint8_t) {}
+inline void ottoCueClear() {}
 #endif
 
 // ---- Standalone-panel hooks (touchscreen STOP / abort) ----------------------

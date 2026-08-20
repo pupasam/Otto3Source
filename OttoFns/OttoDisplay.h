@@ -16,6 +16,11 @@
 //   ottoPanelPump(true, 18.9f);                  // RUNNING + live "19s LEFT"
 //   ottoTick();                                  // call at 2-10 Hz from waits
 //   ottoStepEnd();                               // freeze timer, pill = DONE
+//   ottoCue("EYES ON NEEDLES", OTTO_CUE_WATCH);  // observation cue banner in
+//                                                // the footer (CALM = steady
+//                                                // grey/blue info; WATCH =
+//                                                // amber, pulsed by ottoTick)
+//   ottoCueClear();                              // banner off, footer back
 //   ottoShowError("VALVE 2 NOT RESPONDING");     // red takeover; any later
 //                                                // call rebuilds the dashboard
 //
@@ -106,6 +111,11 @@
 #define OTTO_BAR_PAD       4     // gap between frame and fill
 #define OTTO_FLASH_MS    700     // change-flash ring lifetime
 #define OTTO_MARGIN       12     // min side margin for centered text
+#define OTTO_CUE_PULSE_MS 500    // WATCH-cue banner pulse half-period
+
+// Observation-cue levels (ottoCue).
+#define OTTO_CUE_CALM      0     // informational: no need to watch
+#define OTTO_CUE_WATCH     1     // high attention: amber, pulsing
 
 // Panel indices.
 #define OTTO_PAN_REAGENT 0
@@ -153,6 +163,13 @@ static long          otto_pumpShownS   = -1;   // countdown value on screen
 
 // Change-flash ring deadlines (0 = ring is in its normal color).
 static unsigned long otto_flashUntil[4] = {0, 0, 0, 0};
+
+// Observation-cue banner (takes over the footer while active).
+static bool          otto_cueActive    = false;
+static uint8_t       otto_cueLevel     = OTTO_CUE_CALM;
+static char          otto_cueMsg[44]   = "";
+static bool          otto_cuePhase     = false;  // WATCH pulse phase (on/off)
+static unsigned long otto_cueNextPulse = 0;
 
 // Panel origins, indexed by OTTO_PAN_*.
 static const int16_t OTTO_PAN_X[4] = {0, OTTO_PAN_W, 0, OTTO_PAN_W};
@@ -388,8 +405,10 @@ static void otto_drawBarFrame() {
 }
 
 // Repaint elapsed/expected text + bar. Cheap: skips everything while the
-// whole-second elapsed value is unchanged (unless force).
+// whole-second elapsed value is unchanged (unless force). Fully suppressed
+// while an observation cue owns the footer region (see ottoCue below).
 static void otto_footerUpdate(bool force) {
+  if (otto_cueActive) return;
   unsigned long e = otto_elapsedS();
   if (!force && e == otto_lastElapsedS) return;
   otto_lastElapsedS = e;
@@ -456,6 +475,26 @@ static void otto_drawFooter() {
   otto_footerUpdate(true);
 }
 
+// ---- observation-cue banner -------------------------------------------------
+// Paints the footer region (0..OTTO_FOOT_W x OTTO_FOOT_Y..479) as a cue
+// banner. Panels and the STOP zone own disjoint rectangles, so nothing
+// fights it; the elapsed/bar repaint is suppressed while a cue is active.
+static void otto_drawCue() {
+  uint16_t bg, fg;
+  if (otto_cueLevel == OTTO_CUE_WATCH) {         // pulsing amber
+    bg = otto_cuePhase ? OTTO_COL_AMBER : OTTO_COL_BG;
+    fg = otto_cuePhase ? OTTO_COL_BG    : OTTO_COL_AMBER;
+  } else {                                       // steady grey/blue info
+    bg = OTTO_COL_HDR;
+    fg = OTTO_COL_BLUE;
+  }
+  ottoGfx.fillRect(0, OTTO_FOOT_Y, OTTO_FOOT_W, OTTO_FOOT_H, bg);
+  ottoGfx.fillRect(0, OTTO_FOOT_Y, OTTO_FOOT_W, 1, OTTO_COL_BORDER);
+  uint8_t sz = otto_fitSize(otto_cueMsg, OTTO_FOOT_W - 2 * OTTO_MARGIN, 4);
+  otto_centerIn(otto_cueMsg, 0, OTTO_FOOT_W,
+                OTTO_FOOT_Y + (OTTO_FOOT_H - 8 * sz) / 2 + 1, sz, fg);
+}
+
 // ---- STOP zone (touch builds only) ------------------------------------------
 
 #ifdef OTTO_DISPLAY_STOP_ZONE
@@ -491,6 +530,7 @@ static void otto_drawDashboard() {
   otto_drawVacuumPanel();
   otto_drawPumpPanel();
   otto_drawFooter();
+  if (otto_cueActive) otto_drawCue();           // cue survives a rebuild
 #ifdef OTTO_DISPLAY_STOP_ZONE
   otto_drawStopZone();
 #endif
@@ -534,6 +574,7 @@ static void ottoStepBegin(const char* name, unsigned long expected_s) {
   otto_stepStartMs  = millis();
   otto_stepExpected = expected_s;
   otto_pill         = OTTO_PILL_RUNNING;
+  otto_cueActive    = false;        // a new step retires any leftover cue
   otto_drawStepName();
   otto_drawPill();
   otto_drawFooter();                // fresh 00:00 + empty bar
@@ -553,6 +594,35 @@ static void ottoStepEnd() {
   otto_pill     = OTTO_PILL_DONE;
   otto_drawPill();
   otto_footerUpdate(true);          // land exactly on the final time
+}                                   // (no-op while a cue holds the footer)
+
+// Observation cue: banner over the footer telling the operator whether the
+// instrument needs eyes right now. msg <= ~40 chars (auto-sized, truncated
+// beyond 43). Levels:
+//   OTTO_CUE_CALM  - steady dark banner, blue text: informational
+//   OTTO_CUE_WATCH - amber banner, pulsed every OTTO_CUE_PULSE_MS by
+//                    ottoTick() so peripheral vision catches it
+// The elapsed/progress footer is suppressed while a cue is up and comes
+// back on ottoCueClear(). ottoStepBegin() also retires any leftover cue.
+static void ottoCue(const char* msg, uint8_t level) {
+  if (!otto_inited) return;
+  otto_rebuildIfNeeded();
+  strncpy(otto_cueMsg, (msg && msg[0]) ? msg : "--", sizeof(otto_cueMsg) - 1);
+  otto_cueMsg[sizeof(otto_cueMsg) - 1] = '\0';
+  otto_cueLevel     = level;
+  otto_cueActive    = true;
+  otto_cuePhase     = true;                      // start on the loud phase
+  otto_cueNextPulse = millis() + OTTO_CUE_PULSE_MS;
+  otto_drawCue();
+}
+
+// Retire the cue banner and restore the elapsed/progress footer.
+static void ottoCueClear() {
+  if (!otto_inited) return;
+  otto_rebuildIfNeeded();
+  if (!otto_cueActive) return;
+  otto_cueActive = false;
+  otto_drawFooter();
 }
 
 // Reagent valve panel: big port digit + reagent name
@@ -644,6 +714,14 @@ static void ottoTick() {
       otto_flashUntil[p] = 0;
       otto_panelRing(p, OTTO_COL_BORDER);
     }
+  }
+
+  // Pulse the WATCH cue banner (alternate every OTTO_CUE_PULSE_MS).
+  if (otto_cueActive && otto_cueLevel == OTTO_CUE_WATCH &&
+      (long)(now - otto_cueNextPulse) >= 0) {
+    otto_cuePhase     = !otto_cuePhase;
+    otto_cueNextPulse = now + OTTO_CUE_PULSE_MS;
+    otto_drawCue();
   }
 }
 
