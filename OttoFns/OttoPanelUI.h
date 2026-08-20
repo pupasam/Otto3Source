@@ -14,13 +14,26 @@
 //     any press in the right STOP column as an emergency stop and latches
 //     ottoAbortFlag (defined in LowLevelFns.ino)
 //   - ottoPanelPark(): post-abort park (pump off, vacuum closed, reagent 4,
-//     sample 1, vacuum 1)
+//     sample 1, vacuum 1) — also offered as the PARK VALVES utility
 //   - ottoPanelLoop(): the whole UI state machine —
-//       MENU -> CONFIRM (checklist gates GO) -> run (dashboard + STOP)
-//            -> RESULT (DONE/ABORTED) -> optional POST instruction -> MENU
-//     plus the STEP 3 guided calibration wizard:
+//       TOP (CALIBRATION / RUN / UTILITIES)
+//        -> submenu (BACK + the category's actions)
+//        -> CONFIRM (checklist gates GO) -> run (dashboard + STOP)
+//        -> RESULT (DONE/ABORTED) -> optional POST instruction -> submenu
+//     plus the STEP 5 (dispense calibration) guided wizard:
 //       run -> keypad "avg uL/well" -> "delta < 50 uL?" -> SUCCESS (save
 //       value) or ADJUST (retune mLPumpTime in RAM, empty plate, loop)
+//
+// Menu tree:
+//   CALIBRATION - steps 1..9 (same calls/formulas as PreRunCalibrationScript):
+//     1 PRIME WASH, 2 PRIME CLEAVAGE, 3 PRIME INCORPORATION, 4 FULL RINSE,
+//     5 DISPENSE CALIBRATION (wizard), 6 DISPENSE + ASPIRATE, 7 NESTED CYCLE,
+//     8 ADDREAGENT INC TUNING, 9 ADDREAGENT CLV VALIDATE
+//   RUN         - FULL RUN (RunProtocol.ino)
+//   UTILITIES   - one-off bench actions reusing existing functions only:
+//     2-minute line primes (wash/cleavage/incorporation), FULL RINSE,
+//     DISPENSE 1 mL ALL WELLS, ASPIRATE ALL WELLS, SHUTDOWN FLUSH (water,
+//     per ShutdownScript), PARK VALVES
 //
 // STOP semantics (the safety core): while an action runs, one press on the
 // red STOP column aborts with NO confirmation. The latch makes Wait() return
@@ -44,14 +57,24 @@
 
 extern volatile bool ottoAbortFlag;   // defined in LowLevelFns.ino
 
+static void ottoPanelPark();          // defined below; also a UTILITIES action
+
 // ------------------------------------------------------------- UI colors ---
 #define OTTO_UI_BTN_FILL   0x18E3    // dark grey button
 #define OTTO_UI_BTN_NAVY   0x0210    // FULL RUN accent
 #define OTTO_UI_GO_OFF_TXT OTTO_COL_GREY
 
-// -------------------------------------------------------- menu geometry ----
+// --------------------------------------------------- top-menu geometry -----
+// Three full-width category buttons under a 48 px title bar.
+#define OTTO_UI_TOP_X       8
+#define OTTO_UI_TOP_W     784
+#define OTTO_UI_TOP_H     124
+#define OTTO_UI_TOP_Y0     56
+#define OTTO_UI_TOP_STEP  140
+
+// ---------------------------------------------------- submenu geometry -----
 // 2 cols x 5 rows of 384x78 buttons under a 48 px title bar (all >= 78 px
-// tall, ~13 mm on the 4" panel).
+// tall, ~13 mm on the 4" panel). Cell 0 is always BACK.
 #define OTTO_UI_MENU_TOP   48
 #define OTTO_UI_ROW_H      86
 #define OTTO_UI_BTN_W     384
@@ -82,7 +105,7 @@ extern volatile bool ottoAbortFlag;   // defined in LowLevelFns.ino
 #define OTTO_UI_KP_YSTEP  106
 #define OTTO_UI_KP_ENTRY_MAX 4      // digits
 
-// STEP 3 pass window (uL/well): "average = 1 mL, aim a hair over".
+// STEP 5 pass window (uL/well): "average = 1 mL, aim a hair over".
 #define OTTO_WIZ_TARGET_LO 1000.0f
 #define OTTO_WIZ_TARGET_HI 1080.0f
 // Sanity window for keypad entry (uL) — OK is ignored outside it.
@@ -90,13 +113,14 @@ extern volatile bool ottoAbortFlag;   // defined in LowLevelFns.ino
 #define OTTO_WIZ_ENTRY_HI  3000
 
 // ------------------------------------------------------------ UI states ----
-#define OTTO_ST_MENU        0
-#define OTTO_ST_CONFIRM     1
-#define OTTO_ST_RESULT      2   // DONE or ABORTED
-#define OTTO_ST_POST        3   // post-step operator instruction
-#define OTTO_ST_WIZ_VOL     4   // keypad: avg uL per well
-#define OTTO_ST_WIZ_DELTA   5   // yes/no: delta < 50 uL
-#define OTTO_ST_WIZ_OUTCOME 6   // SUCCESS or ADJUST screen
+#define OTTO_ST_TOP         0   // CALIBRATION / RUN / UTILITIES
+#define OTTO_ST_MENU        1   // submenu of the selected category
+#define OTTO_ST_CONFIRM     2
+#define OTTO_ST_RESULT      3   // DONE or ABORTED
+#define OTTO_ST_POST        4   // post-step operator instruction
+#define OTTO_ST_WIZ_VOL     5   // keypad: avg uL per well
+#define OTTO_ST_WIZ_DELTA   6   // yes/no: delta < 50 uL
+#define OTTO_ST_WIZ_OUTCOME 7   // SUCCESS or ADJUST screen
 
 // Post-instruction ids.
 #define OTTO_POST_NONE        0
@@ -104,49 +128,87 @@ extern volatile bool ottoAbortFlag;   // defined in LowLevelFns.ino
 #define OTTO_POST_SEEDED      2
 
 // --------------------------------------------------------------- actions ---
-// Labels, expected-duration formulas and function calls are EXACTLY the ones
-// in PreRunCalibrationScript.ino (steps) and RunProtocol.ino (full run).
-#define OTTO_ACT_STEP3     4    // index of the wizard-driven action
-#define OTTO_ACT_STEP5     6
-#define OTTO_ACT_FULLRUN   9
+// Calibration labels, expected-duration formulas and function calls are
+// EXACTLY the ones in PreRunCalibrationScript.ino (steps 1..9); FULL RUN is
+// RunProtocol.ino; UTILITIES reuse existing OttoFns functions only.
+#define OTTO_ACT_STEP4RINSE  3   // STEP 4 FULL RINSE (empty-plate post screen)
+#define OTTO_ACT_DISPCAL     4   // STEP 5 DISPENSE CALIBRATION (the wizard)
+#define OTTO_ACT_NESTED      6   // STEP 7 NESTED CYCLE (seeded-repeat post)
+#define OTTO_ACT_FULLRUN     9
 
 static const char* const OTTO_UI_LABEL[] = {
-  "STEP 1.1 PRIME WASH",
-  "STEP 1.2 PRIME CLV",
-  "STEP 1.3 PRIME INC",
-  "STEP 2 FULL RINSE",
-  "STEP 3 DISPENSE",
-  "STEP 4 DISP+ASP",
-  "STEP 5 NESTED CYCLE",
-  "STEP 7 ADDREAGENT INC",
-  "STEP 8 ADDREAGENT CLV",
+  // CALIBRATION (indices 0..8 = steps 1..9)
+  "STEP 1 PRIME WASH",
+  "STEP 2 PRIME CLEAVAGE",
+  "STEP 3 PRIME INCORPORATION",
+  "STEP 4 FULL RINSE",
+  "STEP 5 DISPENSE CALIBRATION",
+  "STEP 6 DISPENSE + ASPIRATE",
+  "STEP 7 NESTED CYCLE",
+  "STEP 8 ADDREAGENT INC TUNING",
+  "STEP 9 ADDREAGENT CLV VALIDATE",
+  // RUN (index 9)
   "FULL RUN",
+  // UTILITIES (indices 10..17)
+  "PRIME WASH (2 MIN)",
+  "PRIME CLEAVAGE (2 MIN)",
+  "PRIME INCORPORATION (2 MIN)",
+  "FULL RINSE",
+  "DISPENSE 1 mL ALL WELLS",
+  "ASPIRATE ALL WELLS",
+  "SHUTDOWN FLUSH (WATER)",
+  "PARK VALVES",
 };
-#define OTTO_UI_NACT 10
+#define OTTO_UI_NACT 18
 
-// Expected duration (s) — same formulas as the calibration script call
-// sites; 0 = no estimate (footer shows elapsed only). Computed at confirm
-// time so a wizard-adjusted mLPumpTime is reflected immediately.
-static unsigned long ottoActExpectedS(uint8_t i) {
-  switch (i) {
-    case 0: case 1: case 2:
-      return 20;
-    case 3: return (unsigned long)(61 * mLPumpTime + 2 * fillTime);
-    case 4: return (unsigned long)(WellLength * mLPumpTime);
-    case 5: return (unsigned long)(WellLength * (mLPumpTime + vacTime) + fillTime);
-    case 6: return (unsigned long)(WellLength * 2 * mLPumpTime + fillTime);
-    default: return 0;   // steps 7, 8 and the full run have no formula
+// Menu tree: category -> action indices. Submenu cell 0 is BACK, so a
+// category holds at most 9 actions (2x5 grid).
+static const char* const OTTO_CAT_NAME[3] = {"CALIBRATION", "RUN", "UTILITIES"};
+static const uint8_t OTTO_CAT_CAL_A[]  = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+static const uint8_t OTTO_CAT_RUN_A[]  = {9};
+static const uint8_t OTTO_CAT_UTIL_A[] = {10, 11, 12, 13, 14, 15, 16, 17};
+
+static const uint8_t* ottoCatActs(uint8_t cat, uint8_t& n) {
+  switch (cat) {
+    case 0:  n = sizeof(OTTO_CAT_CAL_A);  return OTTO_CAT_CAL_A;
+    case 1:  n = sizeof(OTTO_CAT_RUN_A);  return OTTO_CAT_RUN_A;
+    default: n = sizeof(OTTO_CAT_UTIL_A); return OTTO_CAT_UTIL_A;
   }
 }
 
-// The same function calls as the calibration script / run protocol.
+// Expected duration (s) — calibration formulas are the calibration script's
+// call-site formulas; 0 = no estimate (footer shows elapsed only). Computed
+// at confirm time so a wizard-adjusted mLPumpTime is reflected immediately.
+static unsigned long ottoActExpectedS(uint8_t i) {
+  switch (i) {
+    case 0: case 1: case 2:                        // steps 1-3: 20 s primes
+      return 20;
+    case 3: case 13: case 16:                      // fullRinse (all flavors)
+      return (unsigned long)(61 * mLPumpTime + 2 * fillTime);
+    case 4: case 14:                               // DispenseLines, 1 mL/well
+      return (unsigned long)(WellLength * mLPumpTime);
+    case 5: return (unsigned long)(WellLength * (mLPumpTime + vacTime) + fillTime);
+    case 6: return (unsigned long)(WellLength * 2 * mLPumpTime + fillTime);
+    case 10: case 11: case 12:                     // utility 2-minute primes
+      return 120;
+    case 15:                                       // AspirateLines
+      return (unsigned long)(WellLength * vacTime + fillTime);
+    case 17: return 5;                             // park: 3 valve moves
+    default: return 0;   // steps 8, 9 and the full run have no formula
+  }
+}
+
+// The same function calls as the calibration script / run protocol; the
+// utilities reuse those functions with bench-friendly durations.
 static void ottoActRun(uint8_t i) {
   switch (i) {
     case 0: RunPumpLine(WASH, 8, 20); break;
     case 1: RunPumpLine(CLEAVAGE, 8, 20); break;
     case 2: RunPumpLine(INCORPORATION, 8, 20); break;
-    case 3: fullRinse(WellLength, SampleWells, mLPumpTime); break;
-    case 4: DispenseLines(WellLength, SampleWells, WASH, mLPumpTime); break;
+    case 3: case 13: case 16:
+            fullRinse(WellLength, SampleWells, mLPumpTime); break;
+    case 4: case 14:
+            DispenseLines(WellLength, SampleWells, WASH, mLPumpTime); break;
     case 5: DispenseLines(WellLength, SampleWells, WASH, mLPumpTime);
             AspirateLines(WellLength, VacuumWells, vacTime, SafeVacA, SafeVacB, fillTime);
             break;
@@ -161,55 +223,82 @@ static void ottoActRun(uint8_t i) {
               SBSVolume, ReagentLineVolume, SampleLineTotalVolume, VentPort,
               mLPumpTime, vacTime, airTime, fillTime, SafeVacA, SafeVacB);
             break;
-    case 9: runAutomation(); break;
+    case 9:  runAutomation(); break;
+    case 10: RunPumpLine(WASH, 8, 120); break;
+    case 11: RunPumpLine(CLEAVAGE, 8, 120); break;
+    case 12: RunPumpLine(INCORPORATION, 8, 120); break;
+    case 15: AspirateLines(WellLength, VacuumWells, vacTime, SafeVacA, SafeVacB, fillTime);
+             break;
+    case 17: ottoPanelPark(); break;
   }
 }
 
 // Pre-run checklists, from the calibration script's SETUP banner + README
-// operational rules. Short texts, drawn big; the GO button stays disabled
-// until every row is checked.
+// operational rules (SHUTDOWN FLUSH: water reservoirs, per ShutdownScript).
+// Short texts, drawn big; GO stays disabled until every row is checked.
 #define OTTO_CK_RES   "RESERVOIRS FULL, LINES TO BOTTOM"
 #define OTTO_CK_PUMP  "PUMP ARMED (STOP AFTER KEYPAD USE)"
 #define OTTO_CK_VAC   "VACUUM OPEN, TRAP IN LINE, 12V ON"
+#define OTTO_CK_VENT  "VENT LINE (PORT 8) TO WASTE"
+#define OTTO_CK_MANI  "MANIFOLD SEATED ON PLATE"
 
 static uint8_t ottoActChecklist(uint8_t i, const char** items) {
   switch (i) {
-    case 0: case 1: case 2:                       // STEP 1.x — prime to vent
+    case 0: case 1: case 2:                       // STEPS 1-3 — prime to vent
+    case 10: case 11: case 12:                    // utility 2-minute primes
       items[0] = OTTO_CK_RES;
-      items[1] = "VENT LINE (PORT 8) TO WASTE";
+      items[1] = OTTO_CK_VENT;
       items[2] = OTTO_CK_PUMP;
       return 3;
-    case 3:                                       // STEP 2 — full rinse
+    case 3: case 13:                              // FULL RINSE (step 4 / util)
       items[0] = OTTO_CK_RES;
       items[1] = "MANIFOLD ON EMPTY TEST PLATE";
       items[2] = OTTO_CK_VAC;
       items[3] = OTTO_CK_PUMP;
       return 4;
-    case 4:                                       // STEP 3 — dispense cal
+    case 4:                                       // STEP 5 — dispense cal
       items[0] = "PLATE EMPTY";
       items[1] = OTTO_CK_RES;
-      items[2] = "MANIFOLD SEATED ON PLATE";
+      items[2] = OTTO_CK_MANI;
       items[3] = OTTO_CK_PUMP;
       return 4;
-    case 5:                                       // STEP 4 — disp + asp
+    case 5:                                       // STEP 6 — disp + asp
       items[0] = "PLATE EMPTY";
       items[1] = OTTO_CK_RES;
       items[2] = OTTO_CK_VAC;
       items[3] = OTTO_CK_PUMP;
       return 4;
-    case 6:                                       // STEP 5 — nested cycle
+    case 6:                                       // STEP 7 — nested cycle
       items[0] = "UNSEEDED FIRST, THEN SEEDED PLATE";
       items[1] = OTTO_CK_RES;
       items[2] = OTTO_CK_VAC;
       items[3] = OTTO_CK_PUMP;
       return 4;
-    case 7: case 8:                               // STEP 7/8 — addReagent
+    case 7: case 8:                               // STEPS 8/9 — addReagent
       items[0] = "SBS REAGENTS LOADED (INC + CLV)";
       items[1] = "PORT 6 (AIR) DRY - NO TUBING";
       items[2] = OTTO_CK_VAC;
       items[3] = OTTO_CK_PUMP;
-      items[4] = "MANIFOLD SEATED ON PLATE";
+      items[4] = OTTO_CK_MANI;
       return 5;
+    case 14:                                      // DISPENSE 1 mL ALL WELLS
+      items[0] = OTTO_CK_MANI;
+      items[1] = OTTO_CK_RES;
+      items[2] = OTTO_CK_PUMP;
+      return 3;
+    case 15:                                      // ASPIRATE ALL WELLS
+      items[0] = OTTO_CK_MANI;
+      items[1] = OTTO_CK_VAC;
+      return 2;
+    case 16:                                      // SHUTDOWN FLUSH
+      items[0] = "ALL RESERVOIRS SWAPPED TO WATER";
+      items[1] = "MANIFOLD ON EMPTY TEST PLATE";
+      items[2] = OTTO_CK_VAC;
+      items[3] = OTTO_CK_PUMP;
+      return 4;
+    case 17:                                      // PARK VALVES
+      items[0] = "MOVES VALVES TO 4 / 1 / 1";
+      return 1;
     default:                                      // FULL RUN
       items[0] = "REAGENTS LOADED, LINES TO BOTTOM";
       items[1] = "SEEDED PLATE + MANIFOLD SEATED";
@@ -230,8 +319,9 @@ static unsigned long ottoTouchMuteTil  = 0;   // swallow presses through transit
 static bool          ottoStopArmed     = false; // a run is live: STOP column hot
 
 // ------------------------------------------------------------- UI state ----
-static uint8_t       ottoUiState       = OTTO_ST_MENU;
+static uint8_t       ottoUiState       = OTTO_ST_TOP;
 static bool          ottoUiDrawn       = false;
+static uint8_t       ottoUiCat         = 0;      // selected category
 static uint8_t       ottoUiSel         = 0;      // selected action index
 static bool          ottoUiCk[OTTO_CK_MAX];      // checklist ticks
 static const char*   ottoUiCkItem[OTTO_CK_MAX];
@@ -240,7 +330,7 @@ static bool          ottoUiAborted     = false;
 static unsigned long ottoUiMeasuredS   = 0;      // DONE: measured duration
 static unsigned long ottoUiAbortAtS    = 0;      // ABORTED: elapsed at stop
 static uint8_t       ottoUiPost        = OTTO_POST_NONE;
-static bool          ottoUiStep5Ran    = false;  // first nested-cycle pass done
+static bool          ottoUiStep7Ran    = false;  // first nested-cycle pass done
 
 // ---------------------------------------------------------- wizard state ---
 static char          ottoWizEntry[OTTO_UI_KP_ENTRY_MAX + 1] = "";
@@ -256,8 +346,7 @@ static uint8_t       ottoWizStreak     = 0;      // consecutive in-window passes
 // dashboard runs setRotation(1); Arduino_GigaDisplay_GFX::drawPixel maps
 // logical -> native as { x_n = 479 - y_l ; y_n = x_l }, so the inverse is:
 //   screen_x = raw_y ;  screen_y = 479 - raw_x
-// If a future shield revision mirrors this, taps land flipped: fix it HERE
-// (one place), verified in seconds with the serial "TOUCH x y" log below.
+// Hardware-verified 2026-08 on the instrument's shield.
 static void ottoTouchMap(uint16_t rx, uint16_t ry, int16_t& sx, int16_t& sy) {
   sx = (int16_t)ry;
   sy = (int16_t)(479 - rx);
@@ -328,10 +417,10 @@ static bool ottoUiIn(int16_t x, int16_t y,
 }
 
 // ------------------------------------------------------------ park (abort) -
-// Post-abort park: hardware to a known safe state. Pump and vacuum first
-// (instant GPIO), then the slow valve moves. The abort latch is cleared
-// before the moves — Select*Port are no-ops while it is set. Runs after the
-// aborted routine has fully unwound (its call has returned).
+// Hardware to a known safe state: pump and vacuum first (instant GPIO), then
+// the slow valve moves. The abort latch is cleared before the moves —
+// Select*Port are no-ops while it is set. After an abort it runs once the
+// aborted routine has fully unwound; it is also the PARK VALVES utility.
 static void ottoPanelPark() {
   StopPump();
   CloseVacuumLine();
@@ -352,37 +441,82 @@ static void ottoUiButton(int16_t x, int16_t y, int16_t w, int16_t h,
   otto_centerIn(label, x, w, y + (h - 8 * sz) / 2, sz, txt);
 }
 
-// ----------------------------------------------------------------- menu ----
-static void ottoUiMenuRect(uint8_t i, int16_t& x, int16_t& y) {
-  x = (i % 2) ? OTTO_UI_COL1_X : OTTO_UI_COL0_X;
-  y = OTTO_UI_MENU_TOP + (i / 2) * OTTO_UI_ROW_H +
-      (OTTO_UI_ROW_H - OTTO_UI_BTN_H) / 2;
-}
-
-static void ottoUiDrawMenu() {
-  ottoGfx.fillScreen(OTTO_COL_BG);
+static void ottoUiTitleBar(const char* right) {
   ottoGfx.fillRect(0, 0, OTTO_SCR_W, OTTO_UI_MENU_TOP, OTTO_COL_HDR);
   ottoGfx.setTextSize(3);
   ottoGfx.setTextColor(OTTO_COL_FG);
   ottoGfx.setCursor(16, 12);
   ottoGfx.print("OTTO3");
-  otto_centerIn("SELECT ACTION", 220, 560, 12, 3, OTTO_COL_LIGHT);
+  otto_centerIn(right, 220, 560, 12, 3, OTTO_COL_LIGHT);
+}
 
-  for (uint8_t i = 0; i < OTTO_UI_NACT; i++) {
+// ------------------------------------------------------------- top menu ----
+static void ottoUiTopRect(uint8_t i, int16_t& x, int16_t& y) {
+  x = OTTO_UI_TOP_X;
+  y = OTTO_UI_TOP_Y0 + i * OTTO_UI_TOP_STEP;
+}
+
+static void ottoUiDrawTop() {
+  ottoGfx.fillScreen(OTTO_COL_BG);
+  ottoUiTitleBar("SELECT CATEGORY");
+  for (uint8_t i = 0; i < 3; i++) {
     int16_t x, y;
-    ottoUiMenuRect(i, x, y);
-    bool full = (i == OTTO_ACT_FULLRUN);
-    ottoUiButton(x, y, OTTO_UI_BTN_W, OTTO_UI_BTN_H, OTTO_UI_LABEL[i],
+    ottoUiTopRect(i, x, y);
+    bool run = (i == 1);
+    ottoUiButton(x, y, OTTO_UI_TOP_W, OTTO_UI_TOP_H, OTTO_CAT_NAME[i],
+                 run ? OTTO_UI_BTN_NAVY : OTTO_UI_BTN_FILL, OTTO_COL_FG,
+                 run ? OTTO_COL_BLUE : OTTO_COL_GREY, 6);
+  }
+}
+
+static int8_t ottoUiTopHit(int16_t tx, int16_t ty) {
+  for (uint8_t i = 0; i < 3; i++) {
+    int16_t x, y;
+    ottoUiTopRect(i, x, y);
+    if (ottoUiIn(tx, ty, x, y, OTTO_UI_TOP_W, OTTO_UI_TOP_H)) return (int8_t)i;
+  }
+  return -1;
+}
+
+// -------------------------------------------------------------- submenu ----
+// Cell 0 = BACK; cells 1..n = the category's actions.
+static void ottoUiMenuRect(uint8_t cell, int16_t& x, int16_t& y) {
+  x = (cell % 2) ? OTTO_UI_COL1_X : OTTO_UI_COL0_X;
+  y = OTTO_UI_MENU_TOP + (cell / 2) * OTTO_UI_ROW_H +
+      (OTTO_UI_ROW_H - OTTO_UI_BTN_H) / 2;
+}
+
+static void ottoUiDrawMenu() {
+  uint8_t n;
+  const uint8_t* acts = ottoCatActs(ottoUiCat, n);
+  ottoGfx.fillScreen(OTTO_COL_BG);
+  ottoUiTitleBar(OTTO_CAT_NAME[ottoUiCat]);
+
+  int16_t x, y;
+  ottoUiMenuRect(0, x, y);
+  ottoUiButton(x, y, OTTO_UI_BTN_W, OTTO_UI_BTN_H, "< BACK",
+               OTTO_UI_BTN_FILL, OTTO_COL_AMBER, OTTO_COL_AMBER, 3);
+
+  for (uint8_t c = 0; c < n; c++) {
+    uint8_t a = acts[c];
+    ottoUiMenuRect(c + 1, x, y);
+    bool full = (a == OTTO_ACT_FULLRUN);
+    ottoUiButton(x, y, OTTO_UI_BTN_W, OTTO_UI_BTN_H, OTTO_UI_LABEL[a],
                  full ? OTTO_UI_BTN_NAVY : OTTO_UI_BTN_FILL, OTTO_COL_FG,
                  full ? OTTO_COL_BLUE : OTTO_COL_GREY, 3);
   }
 }
 
+// Returns: -2 = BACK, -1 = nothing, else action index.
 static int8_t ottoUiMenuHit(int16_t tx, int16_t ty) {
-  for (uint8_t i = 0; i < OTTO_UI_NACT; i++) {
+  uint8_t n;
+  const uint8_t* acts = ottoCatActs(ottoUiCat, n);
+  for (uint8_t cell = 0; cell <= n; cell++) {
     int16_t x, y;
-    ottoUiMenuRect(i, x, y);
-    if (ottoUiIn(tx, ty, x, y, OTTO_UI_BTN_W, OTTO_UI_BTN_H)) return (int8_t)i;
+    ottoUiMenuRect(cell, x, y);
+    if (ottoUiIn(tx, ty, x, y, OTTO_UI_BTN_W, OTTO_UI_BTN_H)) {
+      return (cell == 0) ? -2 : (int8_t)acts[cell - 1];
+    }
   }
   return -1;
 }
@@ -473,7 +607,7 @@ static void ottoPanelExecute(uint8_t i) {
     ottoStepEnd();            // freeze measured duration on the dashboard
     ottoUiMeasuredS = otto_stepFrozenS;
     ottoUiAborted   = false;
-    if (i == OTTO_ACT_STEP3) {          // guided calibration wizard
+    if (i == OTTO_ACT_DISPCAL) {        // STEP 5: guided calibration wizard
       ottoWizEntry[0] = '\0';
       ottoUiState = OTTO_ST_WIZ_VOL;
     } else {
@@ -526,11 +660,11 @@ static void ottoUiDrawPost() {
                   OTTO_COL_LIGHT);
     otto_centerIn("EMPTY THE", 0, OTTO_SCR_W, 160, 6, OTTO_COL_AMBER);
     otto_centerIn("TEST PLATE", 0, OTTO_SCR_W, 240, 6, OTTO_COL_AMBER);
-    otto_centerIn("STEP 3 CALIBRATES ON AN EMPTY PLATE", 0, OTTO_SCR_W, 330, 2,
+    otto_centerIn("STEP 5 CALIBRATES ON AN EMPTY PLATE", 0, OTTO_SCR_W, 330, 2,
                   OTTO_COL_LIGHT);
   } else {                                  // OTTO_POST_SEEDED
     otto_centerIn("NEXT:", 0, OTTO_SCR_W, 50, 3, OTTO_COL_LIGHT);
-    otto_centerIn("REPEAT STEP 5 ON A", 0, OTTO_SCR_W, 120, 5, OTTO_COL_AMBER);
+    otto_centerIn("REPEAT STEP 7 ON A", 0, OTTO_SCR_W, 120, 5, OTTO_COL_AMBER);
     otto_centerIn("CELL-SEEDED PLATE", 0, OTTO_SCR_W, 180, 5, OTTO_COL_AMBER);
     otto_centerIn("PASS: <= 20 uL PER WELL AFTER ASPIRATIONS", 0, OTTO_SCR_W,
                   280, 2, OTTO_COL_FG);
@@ -541,7 +675,7 @@ static void ottoUiDrawPost() {
                 OTTO_COL_GREY);
 }
 
-// ------------------------------------------------- STEP 3 wizard screens ---
+// ------------------------------------------------- STEP 5 wizard screens ---
 // Keypad keys: index 0..8 = digits 1..9, 9 = DEL, 10 = 0, 11 = OK.
 static void ottoUiKpRect(uint8_t k, int16_t& x, int16_t& y) {
   x = OTTO_UI_KP_X0 + (k % 3) * OTTO_UI_KP_XSTEP;
@@ -574,7 +708,7 @@ static void ottoUiDrawWizEntry() {
 
 static void ottoUiDrawWizVol() {
   ottoGfx.fillScreen(OTTO_COL_BG);
-  otto_centerIn("STEP 3 CALIBRATION", 0, 410, 20, 3, OTTO_COL_LIGHT);
+  otto_centerIn("STEP 5 CALIBRATION", 0, 410, 20, 3, OTTO_COL_LIGHT);
   otto_centerIn("AVG VOLUME PER WELL?", 0, 410, 60, 3, OTTO_COL_FG);
   otto_centerIn("(WEIGH THE PLATE, uL)", 0, 410, 96, 2, OTTO_COL_LIGHT);
   ottoUiDrawWizEntry();
@@ -594,7 +728,7 @@ static void ottoUiDrawWizVol() {
 
 static void ottoUiDrawWizDelta() {
   ottoGfx.fillScreen(OTTO_COL_BG);
-  otto_centerIn("STEP 3 CALIBRATION", 0, OTTO_SCR_W, 30, 3, OTTO_COL_LIGHT);
+  otto_centerIn("STEP 5 CALIBRATION", 0, OTTO_SCR_W, 30, 3, OTTO_COL_LIGHT);
   otto_centerIn("MAX WELL-TO-WELL", 0, OTTO_SCR_W, 90, 4, OTTO_COL_FG);
   otto_centerIn("DELTA UNDER 50 uL?", 0, OTTO_SCR_W, 135, 4, OTTO_COL_FG);
   ottoUiButton(60, 230, 300, 170, "YES", OTTO_COL_GREEN, OTTO_COL_BG,
@@ -607,7 +741,7 @@ static void ottoUiDrawWizOutcome() {
   char buf[56];
   if (ottoWizPassed) {
     ottoGfx.fillScreen(OTTO_COL_BG);
-    otto_centerIn("STEP 3 PASS", 0, OTTO_SCR_W, 30, 5, OTTO_COL_GREEN);
+    otto_centerIn("STEP 5 PASS", 0, OTTO_SCR_W, 30, 5, OTTO_COL_GREEN);
     snprintf(buf, sizeof(buf), "mLPumpTime = %.2f", (double)mLPumpTime);
     otto_centerIn(buf, 0, OTTO_SCR_W, 120, 6, OTTO_COL_FG);
     otto_centerIn("SAVE TO OttoFns/constants.ino", 0, OTTO_SCR_W, 210, 3,
@@ -686,17 +820,34 @@ static void ottoWizDecide() {
 
 // ---------------------------------------------------------- state machine --
 // Call forever from the sketch's loop(). Never parks the CPU: after any
-// result the panel returns to the menu.
+// result the panel returns to the submenu it launched from.
 static void ottoPanelLoop() {
   int16_t tx, ty;
 
   switch (ottoUiState) {
 
+    case OTTO_ST_TOP:
+      if (!ottoUiDrawn) { ottoUiDrawTop(); ottoUiDrawn = true; }
+      if (ottoTapConsume(tx, ty)) {
+        int8_t hit = ottoUiTopHit(tx, ty);
+        if (hit >= 0) {
+          ottoUiCat   = (uint8_t)hit;
+          ottoUiState = OTTO_ST_MENU;
+          ottoUiDrawn = false;
+          ottoTapMute(300);
+        }
+      }
+      break;
+
     case OTTO_ST_MENU:
       if (!ottoUiDrawn) { ottoUiDrawMenu(); ottoUiDrawn = true; }
       if (ottoTapConsume(tx, ty)) {
         int8_t hit = ottoUiMenuHit(tx, ty);
-        if (hit >= 0) {
+        if (hit == -2) {                          // BACK
+          ottoUiState = OTTO_ST_TOP;
+          ottoUiDrawn = false;
+          ottoTapMute(300);
+        } else if (hit >= 0) {
           ottoUiSel  = (uint8_t)hit;
           ottoUiCkN  = ottoActChecklist(ottoUiSel, ottoUiCkItem);
           for (uint8_t i = 0; i < OTTO_CK_MAX; i++) ottoUiCk[i] = false;
@@ -739,11 +890,11 @@ static void ottoPanelLoop() {
         // touch anywhere returns; DONE may route via an instruction screen
         ottoUiPost = OTTO_POST_NONE;
         if (!ottoUiAborted) {
-          if (ottoUiSel == 3) {                     // after STEP 2
+          if (ottoUiSel == OTTO_ACT_STEP4RINSE) {   // after STEP 4 FULL RINSE
             ottoUiPost = OTTO_POST_EMPTY_PLATE;
-          } else if (ottoUiSel == OTTO_ACT_STEP5 && !ottoUiStep5Ran) {
-            ottoUiPost    = OTTO_POST_SEEDED;       // after first STEP 5 pass
-            ottoUiStep5Ran = true;
+          } else if (ottoUiSel == OTTO_ACT_NESTED && !ottoUiStep7Ran) {
+            ottoUiPost     = OTTO_POST_SEEDED;      // after first STEP 7 pass
+            ottoUiStep7Ran = true;
           }
         }
         ottoUiState = (ottoUiPost != OTTO_POST_NONE) ? OTTO_ST_POST
@@ -819,7 +970,7 @@ static void ottoPanelLoop() {
         if (ottoWizPassed) {
           ottoUiState = OTTO_ST_MENU;               // done; streak kept
         } else {
-          // loop: back to the STEP 3 checklist ("PLATE EMPTY" is row 1)
+          // loop: back to the STEP 5 checklist ("PLATE EMPTY" is row 1)
           ottoUiCkN = ottoActChecklist(ottoUiSel, ottoUiCkItem);
           for (uint8_t i = 0; i < OTTO_CK_MAX; i++) ottoUiCk[i] = false;
           ottoUiState = OTTO_ST_CONFIRM;
