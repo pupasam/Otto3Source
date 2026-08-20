@@ -18,7 +18,8 @@ valve, and pulled out through the aspiration valve under house vacuum.
 | Path | What it is |
 |------|-----------|
 | `OttoFns/` | **The shared library — the only place code is edited.** `constants.ino` (pins, I2C addresses, ports, calibrated volumes/times), `LowLevelFns.ino` (valve/pump/solenoid primitives, `setup()`), `OttoFns.ino` (reagent, dispense, aspirate, rinse routines), `RheoLink.h/.cpp` (IDEX I2C valve driver) |
-| `RunOtto3/` | Main sequencing run. Waits on serial for the line `BEGIN AUTOMATION`, then executes the full protocol (`runAutomation()`) |
+| `RunOtto3/` | Main sequencing run. Waits on serial for the line `BEGIN AUTOMATION`, then executes the full protocol (`runAutomation()` in `OttoFns/RunProtocol.ino`) |
+| `OttoPanel/` | Standalone touchscreen control (GIGA Display Shield, no computer): menu of the calibration steps + FULL RUN, per-step pre-run checklists gating a GO/CANCEL confirm, live dashboard with an always-hot red STOP column that aborts immediately and parks the instrument, and a guided Step 3 wizard that retunes `mLPumpTime` in RAM without reflashing. GIGA-only |
 | `PreRunCalibrationScript/` | **The single calibration entry point** — Steps 1–8, protocol documented in-line in the sketch |
 | `ShutdownScript/` | Post-run flush with water reservoirs, plus manual shutdown checklist |
 | `ValidationScripts/` | Hardware exercisers: sweep each valve through its ports, cycle the solenoid, run the pump |
@@ -45,7 +46,8 @@ everything valve-driver related (never poll a moving valve, 100 kHz bus,
 address assignment, retry bounds).
 
 All sketches compile for both `arduino:mbed_giga:giga` (the controller in use)
-and `arduino:avr:mega`.
+and `arduino:avr:mega`, except `OttoPanel`, which is GIGA-only (it needs the
+Display Shield: `Arduino_GigaDisplay_GFX` + `Arduino_GigaDisplayTouch`).
 
 ## Hardware map (what the firmware assumes is plumbed and wired)
 
@@ -134,7 +136,7 @@ Everything is scriptable from a shell — no Arduino IDE required.
 # Find the board (the GIGA appears as /dev/cu.usbmodem*)
 arduino-cli board list
 
-# Compile a sketch (any of the five sketch folders)
+# Compile a sketch (any of the six sketch folders)
 arduino-cli compile --fqbn arduino:mbed_giga:giga PreRunCalibrationScript
 
 # Flash — NOTE: this also STARTS the run immediately
