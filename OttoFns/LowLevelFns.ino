@@ -24,6 +24,30 @@ inline void ottoTick() {}
 inline void ottoShowError(const char*) {}
 #endif
 
+// ---- Standalone-panel hooks (touchscreen STOP / abort) ----------------------
+// The OttoPanel sketch defines OTTO_PANEL_ENABLED and implements the two touch
+// functions in OttoPanelUI.h; every other sketch gets no-op stubs, so serial-
+// driven builds (GIGA or Mega) behave exactly as before.
+//
+// ottoAbortFlag is the emergency-stop latch. It is defined here unconditionally
+// (so the guards below compile everywhere) but only the OttoPanel touch poll
+// ever sets it. While it is set:
+//   - Wait() returns immediately,
+//   - StartPump() / RunPump() / Select*Port() / OpenVacuumLine() are no-ops,
+// so whatever OttoFns routine is in flight unwinds in milliseconds without
+// touching the hardware again. StopPump() and CloseVacuumLine() are never
+// guarded — stopping is always allowed. The panel clears the flag itself
+// before running its park sequence (see ottoPanelPark in OttoPanelUI.h).
+volatile bool ottoAbortFlag = false;
+
+#ifdef OTTO_PANEL_ENABLED
+void ottoTouchBegin();   // implemented in OttoPanelUI.h (OttoPanel sketch)
+void ottoTouchPoll();
+#else
+inline void ottoTouchBegin() {}
+inline void ottoTouchPoll() {}
+#endif
+
 // One RheoLink object per selector valve. Addresses come from constants.ino.
 RheoLink reagentValve;
 RheoLink sampleValve;
@@ -56,6 +80,7 @@ void setup() {
   Serial.begin(9600); // Initialize serial communication
 
   ottoDisplayBegin(); // dashboard up before any valve/pump action
+  ottoTouchBegin();   // GT911 touch (OttoPanel builds; no-op elsewhere)
 
   // Selector valves are now on I2C (RheoLink) rather than BCD GPIO.
   initValves();
@@ -80,13 +105,17 @@ void setup() {
 
 void Wait(float secs) {
   // 100 ms slices instead of one long delay, so the dashboard clock,
-  // progress bar and pump countdown stay live during holds
+  // progress bar and pump countdown stay live during holds — and so the
+  // touch STOP button is polled ~10x per second (OttoPanel builds).
+  if (ottoAbortFlag) return;             // aborted: unwind immediately
   unsigned long total = (unsigned long)(secs * 1000.0f);
   unsigned long t0 = millis();
   while (millis() - t0 < total) {
     unsigned long left = total - (millis() - t0);
     delay(left < 100 ? left : 100);
     ottoTick();
+    ottoTouchPoll();                     // may set ottoAbortFlag
+    if (ottoAbortFlag) return;
   }
 }
 
@@ -97,31 +126,36 @@ void Wait(float secs) {
 // set_position() blocks until the valve confirms the position (or times out),
 // replacing the old instantaneous digitalWrite of the 4 BCD lines.
 void SelectVacuumPort(int port) {
+  if (ottoAbortFlag) return;             // aborted: no new hardware action
   vacuumValve.set_position((uint8_t)port, true, RheoLink_TIMEOUT);
   ottoPanelVacuumPort(port);
 }
 
 void SelectReagentPort(int port) {
+  if (ottoAbortFlag) return;             // aborted: no new hardware action
   reagentValve.set_position((uint8_t)port, true, RheoLink_TIMEOUT);
   ottoPanelReagent(port);
 }
 
 void SelectSamplePort(int port) {
+  if (ottoAbortFlag) return;             // aborted: no new hardware action
   sampleValve.set_position((uint8_t)port, true, RheoLink_TIMEOUT);
   ottoPanelSample(port);
 }
 
 void StartPump() {
+  if (ottoAbortFlag) return;             // aborted: pump must not start
   digitalWrite(PumpPin,0); //pump has pull-up transistor
   ottoPanelPump(true, -1);
 }
 
-void StopPump() {
+void StopPump() {                        // never guarded: stopping is safe
   digitalWrite(PumpPin,1);
   ottoPanelPump(false, 0);
 }
 
 void RunPump(float secs) {
+  if (ottoAbortFlag) return;             // aborted: no new hardware action
   StartPump();
   ottoPanelPump(true, secs); // arm the on-screen countdown
   Wait(secs);
@@ -129,6 +163,7 @@ void RunPump(float secs) {
 }
 
 void OpenVacuumLine() {
+  if (ottoAbortFlag) return;             // aborted: vacuum must not open
   digitalWrite(SolenoidPin,1);
   ottoPanelSolenoid(true);
 }

@@ -37,6 +37,15 @@
 //   REAGENT (  0,  64, 400, 176)   SAMPLE (400,  64, 400, 176)
 //   VACUUM  (  0, 240, 400, 176)   PUMP   (400, 240, 400, 176)
 //
+// STOP zone (optional, touch builds - OttoPanel): define
+// OTTO_DISPLAY_STOP_ZONE before including this header and the right column
+// x >= 680 (120 x 416 px, below the header) is reserved for a big red STOP
+// button: the panel grid narrows to 340 px per panel and the footer shortens
+// to 680 px, so no partial repaint ever paints under the button. This header
+// only DRAWS the button (on every dashboard rebuild); deciding what a press
+// there means is the touch layer's job (OttoPanelUI.h). Without the define
+// the classic full-width geometry above is byte-identical.
+//
 // No-flicker discipline: every update repaints only the rectangle it owns
 // (partial fillRect + reprint). Full-screen clears happen only in
 // ottoDisplayBegin(), ottoShowError(), and the one rebuild after an error.
@@ -73,7 +82,6 @@
 #define OTTO_HDR_NAME_X  146     // step-name region 146..549 (OTTO3 ends ~136)
 #define OTTO_HDR_NAME_W  404
 #define OTTO_HDR_PILL_X  550     // pill reserve 550..799
-#define OTTO_PAN_W       400     // panel grid: 2 x 2
 #define OTTO_PAN_H       176
 #define OTTO_PAN_TOP      64     // first panel row y
 #define OTTO_FOOT_Y      416     // footer 416..479
@@ -81,10 +89,20 @@
 #define OTTO_TIME_X       16     // footer time text "MM:SS / MM:SS", size 3
 #define OTTO_TIME_Y      436
 #define OTTO_TIME_W      252
-#define OTTO_BAR_X       280     // footer progress bar
 #define OTTO_BAR_Y       428
-#define OTTO_BAR_W       500
 #define OTTO_BAR_H        36
+#ifdef OTTO_DISPLAY_STOP_ZONE    // right column reserved for the STOP button
+#define OTTO_STOP_X      680     // STOP column x 680..799 (120 px wide)
+#define OTTO_PAN_W       340     // panel grid narrows: 2 x 340 = 680
+#define OTTO_FOOT_W      680     // footer stops short of the column
+#define OTTO_BAR_X       272     // footer progress bar (shortened)
+#define OTTO_BAR_W       400
+#else
+#define OTTO_PAN_W       400     // panel grid: 2 x 2, full width
+#define OTTO_FOOT_W      800
+#define OTTO_BAR_X       280     // footer progress bar
+#define OTTO_BAR_W       500
+#endif
 #define OTTO_BAR_PAD       4     // gap between frame and fill
 #define OTTO_FLASH_MS    700     // change-flash ring lifetime
 #define OTTO_MARGIN       12     // min side margin for centered text
@@ -137,7 +155,7 @@ static long          otto_pumpShownS   = -1;   // countdown value on screen
 static unsigned long otto_flashUntil[4] = {0, 0, 0, 0};
 
 // Panel origins, indexed by OTTO_PAN_*.
-static const int16_t OTTO_PAN_X[4] = {0, 400, 0, 400};
+static const int16_t OTTO_PAN_X[4] = {0, OTTO_PAN_W, 0, OTTO_PAN_W};
 static const int16_t OTTO_PAN_Y[4] = {OTTO_PAN_TOP, OTTO_PAN_TOP,
                                       OTTO_PAN_TOP + OTTO_PAN_H,
                                       OTTO_PAN_TOP + OTTO_PAN_H};
@@ -430,13 +448,34 @@ static void otto_footerUpdate(bool force) {
 }
 
 static void otto_drawFooter() {
-  ottoGfx.fillRect(0, OTTO_FOOT_Y, OTTO_SCR_W, OTTO_FOOT_H, OTTO_COL_BG);
-  ottoGfx.fillRect(0, OTTO_FOOT_Y, OTTO_SCR_W, 1, OTTO_COL_BORDER);
+  ottoGfx.fillRect(0, OTTO_FOOT_Y, OTTO_FOOT_W, OTTO_FOOT_H, OTTO_COL_BG);
+  ottoGfx.fillRect(0, OTTO_FOOT_Y, OTTO_FOOT_W, 1, OTTO_COL_BORDER);
   otto_barFrame     = false;
   otto_lastTime[0]  = '\0';
   otto_lastElapsedS = (unsigned long)-1;
   otto_footerUpdate(true);
 }
+
+// ---- STOP zone (touch builds only) ------------------------------------------
+
+#ifdef OTTO_DISPLAY_STOP_ZONE
+// Big red STOP button filling the reserved right column (below the header).
+// Redrawn on every dashboard rebuild; the touch layer owns the hit-testing.
+static void otto_drawStopZone() {
+  const int16_t x = OTTO_STOP_X, w = OTTO_SCR_W - OTTO_STOP_X;   // 120 px
+  const int16_t y = OTTO_HDR_H,  h = OTTO_SCR_H - OTTO_HDR_H;    // 416 px
+  ottoGfx.fillRect(x, y, w, h, OTTO_COL_BG);
+  ottoGfx.fillRoundRect(x + 4, y + 4, w - 8, h - 8, 12, OTTO_COL_RED);
+  // "STOP" stacked vertically: size-8 letters (48 x 64 px cells).
+  static const char letters[5] = "STOP";
+  const int16_t lh = 64, gap = 20;
+  int16_t ly = y + (h - (4 * lh + 3 * gap)) / 2;
+  for (uint8_t i = 0; i < 4; i++) {
+    char s[2] = {letters[i], '\0'};
+    otto_centerIn(s, x, w, ly + i * (lh + gap), 8, OTTO_COL_FG);
+  }
+}
+#endif
 
 // ---- full dashboard (begin + post-error rebuild) ---------------------------
 
@@ -452,6 +491,9 @@ static void otto_drawDashboard() {
   otto_drawVacuumPanel();
   otto_drawPumpPanel();
   otto_drawFooter();
+#ifdef OTTO_DISPLAY_STOP_ZONE
+  otto_drawStopZone();
+#endif
 }
 
 // Rebuild the dashboard from cached state after the error screen wiped it.
