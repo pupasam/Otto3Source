@@ -19,8 +19,8 @@ valve, and pulled out through the aspiration valve under house vacuum.
 |------|-----------|
 | `OttoFns/` | **The shared library — the only place code is edited.** `constants.ino` (pins, I2C addresses, ports, calibrated volumes/times), `LowLevelFns.ino` (valve/pump/solenoid primitives, `setup()`), `OttoFns.ino` (reagent, dispense, aspirate, rinse routines), `RheoLink.h/.cpp` (IDEX I2C valve driver) |
 | `RunOtto3/` | Main sequencing run. Waits on serial for the line `BEGIN AUTOMATION`, then executes the full protocol (`runAutomation()` in `OttoFns/RunProtocol.ino`) |
-| `OttoPanel/` | Standalone touchscreen control (GIGA Display Shield, no computer): menu of the calibration steps + FULL RUN, per-step pre-run checklists gating a GO/CANCEL confirm, live dashboard with an always-hot red STOP column that aborts immediately and parks the instrument, and a guided Step 3 wizard that retunes `mLPumpTime` in RAM without reflashing. GIGA-only |
-| `PreRunCalibrationScript/` | **The single calibration entry point** — Steps 1–8, protocol documented in-line in the sketch |
+| `OttoPanel/` | Standalone touchscreen control (GIGA Display Shield, no computer): CALIBRATION / RUN / UTILITIES menu tree (calibration steps 1–9, FULL RUN, one-off bench actions like line primes, aspirate-all and the shutdown flush), per-action pre-run checklists gating a GO/CANCEL confirm, live dashboard with an always-hot red STOP column that aborts immediately and parks the instrument, and a guided Step 5 dispense-calibration wizard that retunes `mLPumpTime` in RAM without reflashing. GIGA-only |
+| `PreRunCalibrationScript/` | **The single calibration entry point** — Steps 1–9, protocol documented in-line in the sketch |
 | `ShutdownScript/` | Post-run flush with water reservoirs, plus manual shutdown checklist |
 | `ValidationScripts/` | Hardware exercisers: sweep each valve through its ports, cycle the solenoid, run the pump |
 | `MIGRATION_I2C.md` | Valve-control architecture: addressing, driver behavior (quiet window, bounded retries), bring-up procedure, build mechanics |
@@ -104,7 +104,7 @@ solenoid loop. HIGH = solenoid open = vacuum applied.
 
 All calibrated values live in `OttoFns/constants.ino` (`mLPumpTime`, `vacTime`,
 `SampleLineVolume`, `SampleNeedleVolume`, `ReagentLineVolume`,
-`adjustSampleVolMicro`). The script is a ladder of eight steps; the full
+`adjustSampleVolMicro`). The script is a ladder of nine steps; the full
 protocol — setup prerequisites, pass criteria per step, which constant each
 step tunes — is documented in-line in
 [`PreRunCalibrationScript.ino`](PreRunCalibrationScript/PreRunCalibrationScript.ino).
@@ -120,13 +120,15 @@ The loop for every step:
    (pump stopped, solenoid closed). **Pressing the GIGA's RESET button re-runs
    the flashed step** without re-uploading.
 
-Step summary: 1 — prime the three reagent lines; 2 — end-to-end prime of all
-lines (doubles as the flush cycle); 3 — dispensation volume calibration
-(`mLPumpTime`); 4 — dispense + aspirate (`vacTime`); 5 — nested
-aspirate/dispense motion profile, unseeded then cell-seeded plate; 6 — computed
-line/needle volumes; 7–8 — `AddSBSReagent` air-bubble tuning
-(`ReagentLineVolume`, then `adjustSampleVolMicro`), validated on both SBS
-reagents.
+Step summary: 1–3 — prime the wash / cleavage / incorporation lines; 4 —
+end-to-end prime of all lines (doubles as the flush cycle); 5 — dispensation
+volume calibration (`mLPumpTime`); 6 — dispense + aspirate (`vacTime`); 7 —
+nested aspirate/dispense motion profile, unseeded then cell-seeded plate; 8 —
+`AddSBSReagent` air-bubble tuning with incorporation (`ReagentLineVolume`,
+then `adjustSampleVolMicro`); 9 — validation of those values with cleavage.
+The line/needle dead volumes (`SampleLineVolume`, `SampleNeedleVolume`) are
+computed constants, not a numbered step — see the comment block between
+Steps 7 and 8 in the script.
 
 ## Driving the bench with Claude Code / arduino-cli
 
