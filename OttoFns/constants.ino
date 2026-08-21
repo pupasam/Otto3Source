@@ -4,11 +4,11 @@
 
 float mLPumpTime = 18.8; // amount of time (secs) required to pump 1 mL
 
-float ReagentLineVolume = 0.64; // mL required to move an air bubble from the reagent valve to the sample valve
+float ReagentLineVolume = 0.60; // mL required to move an air bubble from the reagent valve to the sample valve
 
-float SampleLineVolume = 0.113; // sample line volume (mL): 36 in of 1/64" ID ETFE (McMaster 5583K51) at 3.14 uL/in
+float SampleLineVolume = 0.110; // sample line volume (mL): 35 in of 1/64" ID ETFE (McMaster 5583K51) at 3.14 uL/in
 float SampleNeedleVolume = 0.0427; // dispensation needle dead volume based on needle guage
-float adjustSampleVolMicro = 40; //in MICROliters -- can be +/-, final adjustment to calculated sample line volume such that addReagent has expected function
+float adjustSampleVolMicro = 0; //in MICROliters -- can be +/-, final adjustment to calculated sample line volume such that addReagent has expected function
 
 // SampleWells and VacuumWells reference the PORTS on the valve switchers corresponding to each well
 //length of SampleWells and VacuumWells MUST be the same
