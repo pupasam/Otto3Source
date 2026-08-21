@@ -167,8 +167,14 @@ static const char* const OTTO_UI_LABEL[] = {
   "CAL: RESET LINE (WASH PRIME)",
   "CAL: BUBBLE TO VALVE",
   "CAL: BUBBLE TO NEEDLE 1",
+  // Phase-isolated AddSBSReagentMulti verification (WASH only, no vacuum):
+  // SPLIT TEST reproduces the end-of-split state and stops; PURGE TEST runs
+  // the ascending purge loop on that state. Helpers below, production code
+  // in OttoFns.ino untouched.
+  "CAL: SPLIT TEST",
+  "CAL: PURGE TEST",
 };
-#define OTTO_UI_NACT 21
+#define OTTO_UI_NACT 23
 
 // Menu tree: category -> action indices. Submenu cell 0 is BACK, so a
 // category holds at most 9 actions (2x5 grid).
@@ -176,7 +182,7 @@ static const char* const OTTO_CAT_NAME[3] = {"CALIBRATION", "RUN", "UTILITIES"};
 static const uint8_t OTTO_CAT_CAL_A[]  = {0, 1, 2, 3, 4, 5, 6, 7, 8};
 static const uint8_t OTTO_CAT_RUN_A[]  = {9};
 static const uint8_t OTTO_CAT_UTIL_A[] = {10, 11, 12, 13, 14, 15, 16, 17,
-                                          18, 19, 20};
+                                          18, 19, 20, 21, 22};
 
 static const uint8_t* ottoCatActs(uint8_t cat, uint8_t& n) {
   switch (cat) {
@@ -216,8 +222,64 @@ static unsigned long ottoActExpectedS(uint8_t i) {
       }
       return (unsigned long)s;
     }
+    case 21: {                                     // split test: prime + bubble
+      float v     = ReagentLineVolume * mLPumpTime;      // + settle + split
+      float chase = v - airTime;
+      if (chase < 0) chase = 0;
+      return (unsigned long)(v * 2 +
+                             WellLength * (SampleLineTotalVolume * mLPumpTime) * 1.2f +
+                             airTime + chase + 5 + airTime);
+    }
+    case 22:                                       // purge test: 6 purges + vent
+      return (unsigned long)(WellLength * (SampleLineTotalVolume * mLPumpTime) +
+                             ReagentLineVolume * mLPumpTime);
     default: return 0;   // steps 8, 9 and the full run have no formula
   }
+}
+
+// ---- phase-isolated AddSBSReagentMulti verification helpers ----------------
+// Panel-only, WASH-only, no vacuum; the production function in OttoFns.ino
+// is untouched. Runtimes come from the same constants expressions production
+// uses (ventRuntime = ReagentLineVolume*mLPumpTime, SamplePrimeRuntime =
+// SampleLineTotalVolume*mLPumpTime), evaluated when the test runs.
+
+// A) Reproduce the state at the END of the bubble-split phase, then stop:
+// prime vent + all sample lines, draw the bubble + chase it to the sample
+// valve, settle, run the VERBATIM descending split loop. No purge — the
+// operator inspects the parked air slugs.
+static void ottoCalSplitTest() {
+  float ventRuntime       = ReagentLineVolume * mLPumpTime;
+  float SamplePrimeRuntime = SampleLineTotalVolume * mLPumpTime;
+  // 1. prime vent + all 6 sample lines with WASH (Multi's prime volumes)
+  RunPumpLine(WASH, VentPort, ventRuntime * 2);
+  for (int w = 0; w < WellLength; w++) {
+    RunPumpLine(WASH, SampleWells[w], SamplePrimeRuntime * 1.2);
+  }
+  // 2. bubble + chase, exactly as production draws it
+  RunPumpLine(AIR, VentPort, airTime);
+  RunPumpLine(WASH, VentPort, max(0, ventRuntime - airTime));
+  // 3. settle with the bubble parked at the sample valve
+  Wait(5);
+  // 4. verbatim descending split loop (AddSBSReagentMulti)
+  for (int w = WellLength - 1; w >= 0; w--) {
+    RunPumpLine(WASH, SampleWells[w], airTime / WellLength);
+  }
+  // 5. no purge — stop here for inspection (pump already off, no solenoid)
+}
+
+// B) The VERBATIM ascending purge loop only (run right after the split
+// test): per-needle countdown + strobe like production, then vent washout.
+static void ottoCalPurgeTest() {
+  float ventRuntime        = ReagentLineVolume * mLPumpTime;
+  float SamplePrimeRuntime = SampleLineTotalVolume * mLPumpTime;
+  static char cueBuf[36];
+  for (int ww = 0; ww < WellLength; ww++) {
+    snprintf(cueBuf, sizeof(cueBuf), "RED AT NEEDLE %d", ww + 1);
+    ottoCueArm(cueBuf, (unsigned long)(SamplePrimeRuntime * 1000.0f));
+    RunPumpLine(WASH, SampleWells[ww], SamplePrimeRuntime);
+  }
+  RunPumpLine(WASH, VentPort, ventRuntime);  // wash out vent line
+  SelectSamplePort(SampleWells[0]);          // park, as production's tail does
 }
 
 // The same function calls as the calibration script / run protocol; the
@@ -257,6 +319,8 @@ static void ottoActRun(uint8_t i) {
              break;
     case 20: testSampleRuntime(SampleWells, SampleLineTotalVolume, mLPumpTime, airTime, VentPort);
              break;
+    case 21: ottoCalSplitTest(); break;
+    case 22: ottoCalPurgeTest(); break;
   }
 }
 
@@ -273,6 +337,8 @@ static const char* ottoActStepLabel(uint8_t i) {
 static const char* ottoActResultNote(uint8_t i) {
   if (i == 19) return "INSPECT: BUBBLE FRONT AT SAMPLE VALVE?";
   if (i == 20) return "INSPECT: BUBBLE TAIL AT NEEDLE 1 TIP?";
+  if (i == 21) return "INSPECT: AIR SLUG AT SAME SPOT IN ALL 6 LINES?";
+  if (i == 22) return "INSPECT: WASH EDGE AT EVERY NEEDLE HUB?";
   return nullptr;
 }
 
@@ -297,6 +363,16 @@ static uint8_t ottoActChecklist(uint8_t i, const char** items) {
     case 19: case 20:                             // bubble-to-landmark cals
       items[0] = OTTO_CK_RES;                     // (no vacuum: solenoid untouched)
       items[1] = "PORT 6 (AIR) DRY - NO TUBING";
+      items[2] = OTTO_CK_PUMP;
+      return 3;
+    case 21:                                      // split test (no vacuum)
+      items[0] = "WASH RESERVOIR LOADED";
+      items[1] = "PORT 6 (AIR) DRY - NO TUBING";
+      items[2] = OTTO_CK_PUMP;
+      return 3;
+    case 22:                                      // purge test (no vacuum)
+      items[0] = "RUN IMMEDIATELY AFTER CAL: SPLIT TEST";
+      items[1] = "WASH RESERVOIR LOADED";
       items[2] = OTTO_CK_PUMP;
       return 3;
     case 3: case 13:                              // FULL RINSE (step 4 / util)
@@ -408,12 +484,107 @@ void ottoTouchBegin() {
                                 : F("TOUCH INIT FAILED (GT911)"));
 }
 
+// ------------------------------------------------- remote serial interface -
+// One firmware, two interfaces: line-based single-char commands over USB
+// serial (9600) drive the SAME action pipeline as a touch launch, skipping
+// the on-screen checklist/confirm (the remote operator confirms
+// out-of-band). During a run only 'x' (abort) and 's' (status) act; other
+// input answers BUSY. Polled from the same Wait-slice hook as touch.
+static char    ottoSerLine[8];
+static uint8_t ottoSerLen     = 0;
+static char    ottoSerPending = 0;    // idle command awaiting dispatch
+
+void ottoSerialHelp() {
+  Serial.println(F("REMOTE COMMANDS (one per line, 9600 baud):"));
+  Serial.println(F("  1..9  calibration steps 1-9     R  FULL RUN"));
+  Serial.println(F("  w/c/i prime wash/clv/inc 2min   f  FULL RINSE"));
+  Serial.println(F("  d DISPENSE ALL   a ASPIRATE ALL   k PARK VALVES"));
+  Serial.println(F("  r CAL RESET LINE   v CAL BUBBLE TO VALVE"));
+  Serial.println(F("  n CAL BUBBLE TO NEEDLE 1"));
+  Serial.println(F("  t CAL SPLIT TEST   p CAL PURGE TEST"));
+  Serial.println(F("  x STOP/ABORT (during run)   s STATUS   ? this help"));
+}
+
+// Command char -> action index (-1 = not an action command).
+static int8_t ottoSerialAction(char c) {
+  switch (c) {
+    case 'v': return 19;  case 'n': return 20;
+    case 't': return 21;  case 'p': return 22;
+    case 'r': return 18;
+    case 'w': return 10;  case 'c': return 11;  case 'i': return 12;
+    case 'f': return 13;  case 'd': return 14;  case 'a': return 15;
+    case 'k': return 17;  case 'R': return 9;
+    default:
+      if (c >= '1' && c <= '9') return (int8_t)(c - '1');  // steps 1..9
+      return -1;
+  }
+}
+
+static void ottoSerialStatus() {
+  Serial.print(F("STATUS "));
+  if (ottoStopArmed) {
+    Serial.print(F("RUNNING "));
+    Serial.print(ottoActStepLabel(ottoUiSel));
+  } else if (ottoUiState == OTTO_ST_RESULT) {
+    if (ottoUiAborted) Serial.print(F("ABORTED"));
+    else               Serial.print(F("DONE"));
+  } else if (ottoUiState >= OTTO_ST_WIZ_VOL) {
+    Serial.print(F("WIZARD"));
+  } else {
+    Serial.print(F("IDLE"));
+  }
+  Serial.print(F(" elapsed=")); Serial.print(otto_elapsedS()); Serial.print('s');
+  Serial.print(F(" mLPumpTime="));            Serial.print(mLPumpTime);
+  Serial.print(F(" ReagentLineVolume="));     Serial.print(ReagentLineVolume);
+  Serial.print(F(" SampleLineTotalVolume=")); Serial.print(SampleLineTotalVolume);
+  Serial.print(F(" adjustSampleVolMicro=")); Serial.print(adjustSampleVolMicro);
+  Serial.print(F(" vacTime="));               Serial.println(vacTime);
+}
+
+// A completed input line's first character.
+static void ottoSerialCommand(char c) {
+  if (c == 's') { ottoSerialStatus(); return; }
+  if (c == '?') { ottoSerialHelp();   return; }
+  if (c == 'x') {
+    if (ottoStopArmed) {
+      ottoAbortFlag = true;                 // same latch as the red button
+      Serial.println(F("ABORT REQUESTED"));
+    } else {
+      Serial.println(F("NOT RUNNING"));
+    }
+    return;
+  }
+  if (ottoStopArmed) { Serial.println(F("BUSY (RUNNING)")); return; }
+  if (ottoSerialAction(c) < 0) {
+    Serial.println(F("UNKNOWN CMD - ? FOR HELP"));
+    return;
+  }
+  ottoSerPending = c;   // dispatched by ottoPanelLoop in an idle state
+}
+
+// Byte pump: buffer until newline, act on the line's first character.
+static void ottoSerialPoll() {
+  while (Serial.available() > 0) {
+    char ch = (char)Serial.read();
+    if (ch == '\n' || ch == '\r') {
+      if (ottoSerLen > 0) {
+        char c = ottoSerLine[0];
+        ottoSerLen = 0;
+        ottoSerialCommand(c);
+      }
+    } else if (ch != ' ' && ch != '\t') {
+      if (ottoSerLen < sizeof(ottoSerLine) - 1) ottoSerLine[ottoSerLen++] = ch;
+    }
+  }
+}
+
 // Poll the GT911 (25 ms rate limit) and act on press edges only:
 //   - run live (ottoStopArmed): a press at/right of the STOP column latches
 //     ottoAbortFlag — no confirmation, that's the point;
 //   - otherwise: queue the tap for the UI loop.
 // Called from Wait()'s 100 ms slices (via LowLevelFns) and from the UI loop.
 void ottoTouchPoll() {
+  ottoSerialPoll();                 // remote serial rides the same hook
   if (!ottoTouchReady) return;
   unsigned long now = millis();
   if (now - ottoTouchPollMs < 25) return;
@@ -650,7 +821,7 @@ static void ottoUiDrawConfirm() {
 
 // ------------------------------------------------------- execute an action -
 static void ottoPanelExecute(uint8_t i) {
-  Serial.print(F("PANEL RUN: ")); Serial.println(OTTO_UI_LABEL[i]);
+  Serial.print(F("RUN: ")); Serial.println(OTTO_UI_LABEL[i]);  // launch ack
   ottoAbortFlag    = false;
   ottoStopArmed    = true;    // STOP column is hot from this moment
   ottoTapMute(400);
@@ -665,7 +836,7 @@ static void ottoPanelExecute(uint8_t i) {
     ottoPanelPark();          // clears the latch itself, then parks
     ottoUiAborted = true;
     ottoUiState   = OTTO_ST_RESULT;
-    Serial.println(F("PANEL RESULT: ABORTED"));
+    Serial.println(F("ABORTED"));       // end marker for remote drivers
   } else {
     ottoStepEnd();            // freeze measured duration on the dashboard
     ottoUiMeasuredS = otto_stepFrozenS;
@@ -676,8 +847,8 @@ static void ottoPanelExecute(uint8_t i) {
     } else {
       ottoUiState = OTTO_ST_RESULT;
     }
-    Serial.print(F("PANEL RESULT: DONE in "));
-    Serial.print(ottoUiMeasuredS); Serial.println(F(" s"));
+    Serial.print(F("DONE "));           // end marker for remote drivers
+    Serial.print(ottoUiMeasuredS); Serial.println('s');
   }
   ottoUiDrawn = false;
   ottoTapMute(700);           // stray presses through the transition
@@ -711,7 +882,10 @@ static void ottoUiDrawResult() {
     snprintf(buf, sizeof(buf), "MEASURED %s", t);
     otto_centerIn(buf, 0, OTTO_SCR_W, 280, 4, OTTO_COL_FG);
     const char* note = ottoActResultNote(ottoUiSel);
-    if (note) otto_centerIn(note, 0, OTTO_SCR_W, 350, 3, OTTO_COL_AMBER);
+    if (note) {
+      uint8_t nsz = otto_fitSize(note, OTTO_SCR_W - 2 * OTTO_MARGIN, 3);
+      otto_centerIn(note, 0, OTTO_SCR_W, 350, nsz, OTTO_COL_AMBER);
+    }
     otto_centerIn("TOUCH SCREEN TO RETURN TO MENU", 0, OTTO_SCR_W, 440, 2,
                   OTTO_COL_GREY);
   }
@@ -888,6 +1062,23 @@ static void ottoWizDecide() {
 // result the panel returns to the submenu it launched from.
 static void ottoPanelLoop() {
   int16_t tx, ty;
+
+  // Remote launch: dispatch a queued serial command from an idle screen.
+  // Interactive flows (checklist/confirm, wizard) are never hijacked.
+  if (ottoSerPending) {
+    char c = ottoSerPending;
+    ottoSerPending = 0;
+    if (ottoUiState == OTTO_ST_TOP || ottoUiState == OTTO_ST_MENU ||
+        ottoUiState == OTTO_ST_RESULT || ottoUiState == OTTO_ST_POST) {
+      int8_t a = ottoSerialAction(c);
+      if (a >= 0) {
+        ottoUiSel = (uint8_t)a;
+        ottoPanelExecute((uint8_t)a);   // no checklist/confirm: remote
+      }                                 // operator confirms out-of-band
+    } else {
+      Serial.println(F("BUSY (ON-SCREEN FLOW ACTIVE)"));
+    }
+  }
 
   switch (ottoUiState) {
 

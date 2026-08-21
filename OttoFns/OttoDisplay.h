@@ -584,6 +584,8 @@ static void ottoStepBegin(const char* name, unsigned long expected_s) {
   strncpy(otto_stepName, (name && name[0]) ? name : "--",
           sizeof(otto_stepName) - 1);
   otto_stepName[sizeof(otto_stepName) - 1] = '\0';
+  Serial.print(F("STEP: "));            // phase marker for remote drivers
+  Serial.println(otto_stepName);
   otto_stepActive   = true;
   otto_stepDone     = false;
   otto_stepStartMs  = millis();
@@ -630,6 +632,8 @@ static void ottoCue(const char* msg, uint8_t level) {
   otto_cueArmed     = false;                     // replaces any countdown
   otto_cuePhase     = true;                      // start on the loud phase
   otto_cueNextPulse = millis() + OTTO_CUE_PULSE_MS;
+  Serial.print(F("CUE: "));             // phase marker for remote drivers
+  Serial.println(otto_cueMsg);
   otto_drawCue();
 }
 
@@ -659,6 +663,7 @@ static void otto_cueCompose() {
 // next ottoCue*/ottoStep* call replaces it.
 static void otto_cueFire() {
   otto_cueArmed = false;
+  Serial.println(F("CUE: NOW"));        // T-0 marker for remote drivers
   ottoGfx.fillScreen(OTTO_COL_FG);    delay(OTTO_CUE_STROBE_MS);
   ottoGfx.fillScreen(OTTO_COL_AMBER); delay(OTTO_CUE_STROBE_MS);
   ottoGfx.fillScreen(OTTO_COL_FG);    delay(OTTO_CUE_STROBE_MS);
@@ -687,6 +692,8 @@ static void ottoCueArm(const char* msg, unsigned long fire_in_ms) {
   otto_cuePhase     = true;
   otto_cueNextPulse = millis() + OTTO_CUE_PULSE_MS;
   otto_cueCompose();
+  Serial.print(F("CUE: "));             // phase marker (includes " T-Ns")
+  Serial.println(otto_cueMsg);
   otto_drawCue();
 }
 

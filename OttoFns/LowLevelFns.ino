@@ -47,10 +47,12 @@ volatile bool ottoAbortFlag = false;
 
 #ifdef OTTO_PANEL_ENABLED
 void ottoTouchBegin();   // implemented in OttoPanelUI.h (OttoPanel sketch)
-void ottoTouchPoll();
+void ottoTouchPoll();    // touch + remote-serial poll (Wait-slice hook)
+void ottoSerialHelp();   // remote command table (printed at boot + on '?')
 #else
 inline void ottoTouchBegin() {}
 inline void ottoTouchPoll() {}
+inline void ottoSerialHelp() {}
 #endif
 
 // One RheoLink object per selector valve. Addresses come from constants.ino.
@@ -106,6 +108,7 @@ void setup() {
     Serial.println(VacuumWells[i]);
   }
   Serial.println("SETUP COMPLETE");
+  ottoSerialHelp();  // OttoPanel builds: print the remote command table
 }
 
 void Wait(float secs) {
