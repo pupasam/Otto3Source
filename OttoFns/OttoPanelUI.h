@@ -173,8 +173,28 @@ static const char* const OTTO_UI_LABEL[] = {
   // in OttoFns.ino untouched.
   "CAL: SPLIT TEST",
   "CAL: PURGE TEST",
+  // Split test truncated at the park: stops the instant the bubble-well
+  // window ends and seals the line (sample valve -> unplumbed port 1), so
+  // the bubble front freezes at its arrival position - no settle creep, no
+  // split. Reads ReagentLineVolume directly on a still line.
+  "CAL: PARK TEST (NO SPLIT)",
+  // One production split slice (airTime/WellLength of WASH) into the next
+  // line, descending 7->2, resealing after each so every state freezes for
+  // inspection. Armed by CAL: PARK TEST; six presses = the full split as
+  // six separately observable moves.
+  "CAL: NEXT SPLIT SLICE",
+  // Park-titration protocol (operator-gated, decoupled steps):
+  //   1) CAL: PARK TEST parks the bubble (deliberately short is fine);
+  //   2) NUDGE TO 7 advances ~13 uL per press until the operator sees the
+  //      first air tip exit into line 7 - the printed running total then IS
+  //      the measured reagent-line volume (park constant + total);
+  //   3) SPLIT ALL 6 runs the verbatim production split loop in one step
+  //      (no reseals between slices = production dynamics) to measure
+  //      whether air enters all six lines evenly from a known-perfect park.
+  "CAL: NUDGE TO 7 (TITRATE)",
+  "CAL: SPLIT ALL 6 (ONE STEP)",
 };
-#define OTTO_UI_NACT 23
+#define OTTO_UI_NACT 27
 
 // Menu tree: category -> action indices. Submenu cell 0 is BACK, so a
 // category holds at most 9 actions (2x5 grid).
@@ -182,7 +202,7 @@ static const char* const OTTO_CAT_NAME[3] = {"CALIBRATION", "RUN", "UTILITIES"};
 static const uint8_t OTTO_CAT_CAL_A[]  = {0, 1, 2, 3, 4, 5, 6, 7, 8};
 static const uint8_t OTTO_CAT_RUN_A[]  = {9};
 static const uint8_t OTTO_CAT_UTIL_A[] = {10, 11, 12, 13, 14, 15, 16, 17,
-                                          18, 19, 20, 21, 22};
+                                          18, 19, 20, 21, 22, 23, 24, 25, 26};
 
 static const uint8_t* ottoCatActs(uint8_t cat, uint8_t& n) {
   switch (cat) {
@@ -222,20 +242,28 @@ static unsigned long ottoActExpectedS(uint8_t i) {
       }
       return (unsigned long)s;
     }
-    case 21: {                                     // split test: full production
-      // prefix of AddSBSReagentMulti through the split loop (~3 min):
+    case 21: case 23: {                            // split test / park test
+      // full production prefix of AddSBSReagentMulti (~3 min):
       // fill wait + vent prime + sample primes + first-well vac + the six
       // well dispensations (totalPumpTime includes the air draw) + the
-      // interleaved addlVacTime holds + settle + split loop (= airTime)
+      // interleaved addlVacTime holds; the split test (21) adds the settle
+      // + split loop (= airTime), the park test (23) stops at the park.
       float v    = ReagentLineVolume * mLPumpTime;
       float sbsw = (SBSVolume - SampleLineTotalVolume) * mLPumpTime;
       float sp   = SampleLineTotalVolume * mLPumpTime;
       float fill = fillTime - v;    if (fill < 0) fill = 0;
       float av   = vacTime - sbsw;  if (av < 0)   av = 0;
-      return (unsigned long)(fill + 2 * v + WellLength * sp * 1.2f +
-                             vacTime + WellLength * sbsw +
-                             (WellLength - 1) * av + 5 + airTime);
+      float s    = fill + 2 * v + WellLength * sp * 1.2f +
+                   vacTime + WellLength * sbsw + (WellLength - 1) * av;
+      if (i == 21) s += 5 + airTime;
+      return (unsigned long)s;
     }
+    case 24:                                       // one split slice + reseal
+      return (unsigned long)(airTime / WellLength + 4);
+    case 25:                                       // one titration nudge
+      return 4;
+    case 26:                                       // full split loop + seal
+      return (unsigned long)(airTime + 8);
     case 22:                                       // purge test: 6 purges + vent
       return (unsigned long)(WellLength * (SampleLineTotalVolume * mLPumpTime) +
                              ReagentLineVolume * mLPumpTime);
@@ -260,7 +288,28 @@ static unsigned long ottoActExpectedS(uint8_t i) {
 // settle, and the 7->2 descending split loop - then parks (no purge).
 // Runtimes come from the same expressions as AddSBSReagent's dispatcher,
 // so bubbleIdx lands exactly where production puts it.
-static void ottoCalSplitTest() {
+//
+// doSplit=false (CAL: PARK TEST) truncates further: stop the instant the
+// bubble-well window ends - no settle, no split - and seal the line at
+// once, freezing the bubble front at its arrival position so the operator
+// reads ReagentLineVolume error directly on a still line.
+
+// Stepwise-split state: index (into SampleWells, descending) of the next
+// line CAL: NEXT SPLIT SLICE will serve. -1 = exhausted/disarmed (a full
+// split test already ran its split). -2 = fresh boot: the first 'm' starts
+// at the top (port 7), so a reboot/reflash between the park and the slices
+// does not lose the sequence (each slice is just a 1 s wash push - benign
+// even without a parked bubble).
+static int8_t ottoSplitStep = -2;
+
+// Park-titration state: one nudge advances the parked front ~13 uL toward
+// port 7; the running total (pump-seconds since the park) converts to uL so
+// the operator's "first air tip in line 7" call reads the true reagent-line
+// volume directly: ReagentLineVolume + total. Reset by the park test.
+#define OTTO_NUDGE_S 0.25f
+static float ottoNudgeTotal = 0;
+
+static void ottoCalSplitTest(bool doSplit) {
   // --- dispatcher expressions (AddSBSReagent), INCORPORATION as reagent ---
   Reagent reagentName = INCORPORATION;
   float ventRuntime = getPumpRuntime(ReagentLineVolume, mLPumpTime);
@@ -357,18 +406,26 @@ static void ottoCalSplitTest() {
   if ((bubbleIdx + 1) < WellLength-1) {
     RunPumpLine(WASH, SampleWells[WellLength-1], SBSWellRuntime);} //dispense to final well with wash
 
+  if (doSplit) {
   Wait(5); // let bubble settle
 
   for (int w=WellLength-1; w>=0; w--) {
     RunPumpLine(WASH, SampleWells[w], BubbleTimePerSampleLine); //split bubble evenly between sample lines
   }
+  }
   // ======================== verbatim prefix ends ===========================
 
-  // STOP instead of purging: park for still-line inspection.
+  // STOP instead of purging: park for still-line inspection. In park-test
+  // mode this runs immediately after the bubble-well window: switching the
+  // sample valve to unplumbed port 1 seals the line (pump rollers occlude
+  // the other end), so the front cannot creep - it holds where it arrived.
   StopPump();
   CloseVacuumLine();
   SelectSamplePort(1);   // park (port 1 unplumbed)
   SelectVacuumPort(1);   // park
+
+  ottoSplitStep = doSplit ? -1 : (int8_t)(WellLength - 1); // arm stepwise split
+  ottoNudgeTotal = 0;                                      // fresh titration
 }
 
 // B) The VERBATIM ascending purge loop only (run right after the split
@@ -384,6 +441,55 @@ static void ottoCalPurgeTest() {
   }
   RunPumpLine(WASH, VentPort, ventRuntime);  // wash out vent line
   SelectSamplePort(SampleWells[0]);          // park, as production's tail does
+}
+
+// C) ONE production split slice into the next line (descending 7->2), then
+// reseal so the state freezes for inspection. Requires a bubble parked by
+// the park test. Watch what enters the line at unseal + during the 1 s
+// slice: LIQUID = the park is short of the valve; AIR = at/past it. The
+// twitch at unseal (before the pump turns) is stored compression relaxing -
+// the same discharge production's open port sees during its settle.
+static void ottoCalNextSlice() {
+  if (ottoSplitStep == -2) ottoSplitStep = (int8_t)(WellLength - 1); // fresh boot
+  if (ottoSplitStep < 0) {
+    Serial.println(F("SPLIT EXHAUSTED - RUN b (PARK TEST) TO RE-ARM"));
+    return;
+  }
+  int port = SampleWells[ottoSplitStep];
+  Serial.print(F("SPLIT SLICE -> PORT ")); Serial.println(port);
+  RunPumpLine(WASH, port, airTime / WellLength); // verbatim split-slice move
+  SelectSamplePort(1);                           // reseal: freeze this state
+  Serial.print(F("SLICES LEFT: ")); Serial.println(ottoSplitStep);
+  ottoSplitStep--;
+}
+
+// D) One titration nudge: advance the parked front OTTO_NUDGE_S pump-seconds
+// toward port 7, reseal, and print the running total since the park. The
+// operator presses until the first air tip exits into line 7; at that call,
+// ReagentLineVolume + total = the measured valve-to-valve volume.
+static void ottoCalNudge() {
+  RunPumpLine(WASH, SampleWells[WellLength - 1], OTTO_NUDGE_S);
+  SelectSamplePort(1);                           // reseal: freeze for reading
+  ottoNudgeTotal += OTTO_NUDGE_S;
+  float uL = ottoNudgeTotal / mLPumpTime * 1000.0f;
+  Serial.print(F("NUDGE TOTAL SINCE PARK: +"));
+  Serial.print(ottoNudgeTotal, 2); Serial.print(F(" s = +"));
+  Serial.print(uL, 1); Serial.print(F(" uL  (park "));
+  Serial.print(ReagentLineVolume, 3); Serial.print(F(" + "));
+  Serial.print(uL / 1000.0f, 4); Serial.print(F(" = "));
+  Serial.print(ReagentLineVolume + uL / 1000.0f, 4); Serial.println(F(" mL)"));
+}
+
+// E) The verbatim production split loop in ONE step (no reseals between
+// slices = production dynamics), then seal for measurement. Run right after
+// the titration endpoint to test split evenness from a known-perfect park.
+static void ottoCalSplitAll() {
+  float BubbleTimePerSampleLine = airTime / WellLength;
+  for (int w = WellLength - 1; w >= 0; w--) {
+    RunPumpLine(WASH, SampleWells[w], BubbleTimePerSampleLine); // production split
+  }
+  SelectSamplePort(1);                           // seal for measurement
+  ottoSplitStep = -1;                            // split spent
 }
 
 // The same function calls as the calibration script / run protocol; the
@@ -423,8 +529,12 @@ static void ottoActRun(uint8_t i) {
              break;
     case 20: testSampleRuntime(SampleWells, SampleLineTotalVolume, mLPumpTime, airTime, VentPort);
              break;
-    case 21: ottoCalSplitTest(); break;
-    case 22: ottoCalPurgeTest(); break;
+    case 21: ottoCalSplitTest(true);  break;
+    case 22: ottoCalPurgeTest();      break;
+    case 23: ottoCalSplitTest(false); break;   // park test: stop at the park
+    case 24: ottoCalNextSlice();      break;   // one split slice, then reseal
+    case 25: ottoCalNudge();          break;   // titration nudge toward 7
+    case 26: ottoCalSplitAll();       break;   // production split, one step
   }
 }
 
@@ -443,12 +553,17 @@ static const char* ottoActResultNote(uint8_t i) {
   if (i == 20) return "INSPECT: BUBBLE TAIL AT NEEDLE 1 TIP?";
   if (i == 21) return "INSPECT: AIR SLUG AT SAME SPOT IN ALL 6 LINES?";
   if (i == 22) return "INSPECT: WASH EDGE AT EVERY NEEDLE HUB?";
+  if (i == 23) return "INSPECT: BUBBLE FRONT AT SAMPLE VALVE ENTRANCE?";
+  if (i == 24) return "INSPECT: DID AIR OR LIQUID ENTER THE LINE?";
+  if (i == 25) return "INSPECT: AIR TIP EXITING INTO LINE 7 YET?";
+  if (i == 26) return "INSPECT: AIR SLUG AT SAME SPOT IN ALL 6 LINES?";
   return nullptr;
 }
 
 // Optional second DONE-screen line (below the first note).
 static const char* ottoActResultNote2(uint8_t i) {
   if (i == 21) return "WELLS ~1 mL EACH";
+  if (i == 23) return "LINE SEALED - FRONT IS FROZEN WHERE IT ARRIVED";
   return nullptr;
 }
 
@@ -475,7 +590,7 @@ static uint8_t ottoActChecklist(uint8_t i, const char** items) {
       items[1] = "PORT 6 (AIR) DRY - NO TUBING";
       items[2] = OTTO_CK_PUMP;
       return 3;
-    case 21:                                      // split test: full production
+    case 21: case 23:                             // split test / park test
       items[0] = "PR2 IN ALL REAGENT SLOTS";
       items[1] = OTTO_CK_MANI;
       items[2] = OTTO_CK_VAC;
@@ -487,6 +602,10 @@ static uint8_t ottoActChecklist(uint8_t i, const char** items) {
       items[1] = "WASH RESERVOIR LOADED";
       items[2] = OTTO_CK_PUMP;
       return 3;
+    case 24: case 25: case 26:                    // stepwise split / titration
+      items[0] = "BUBBLE PARKED BY CAL: PARK TEST";
+      items[1] = OTTO_CK_PUMP;
+      return 2;
     case 3: case 13:                              // FULL RINSE (step 4 / util)
       items[0] = OTTO_CK_RES;
       items[1] = "MANIFOLD ON EMPTY TEST PLATE";
@@ -614,6 +733,10 @@ void ottoSerialHelp() {
   Serial.println(F("  r CAL RESET LINE   v CAL BUBBLE TO VALVE"));
   Serial.println(F("  n CAL BUBBLE TO NEEDLE 1"));
   Serial.println(F("  t CAL SPLIT TEST   p CAL PURGE TEST"));
+  Serial.println(F("  b CAL PARK TEST (t, STOPS AT PARK - NO SPLIT)"));
+  Serial.println(F("  m CAL NEXT SPLIT SLICE (after b; 6x = full split)"));
+  Serial.println(F("  u CAL NUDGE TO 7 ~13uL (titrate park; prints total)"));
+  Serial.println(F("  M CAL SPLIT ALL 6 (production split, one step)"));
   Serial.println(F("  x STOP/ABORT (during run)   s STATUS   ? this help"));
 }
 
@@ -622,6 +745,8 @@ static int8_t ottoSerialAction(char c) {
   switch (c) {
     case 'v': return 19;  case 'n': return 20;
     case 't': return 21;  case 'p': return 22;
+    case 'b': return 23;  case 'm': return 24;
+    case 'u': return 25;  case 'M': return 26;
     case 'r': return 18;
     case 'w': return 10;  case 'c': return 11;  case 'i': return 12;
     case 'f': return 13;  case 'd': return 14;  case 'a': return 15;

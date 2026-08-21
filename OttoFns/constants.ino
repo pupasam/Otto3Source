@@ -4,7 +4,13 @@
 
 float mLPumpTime = 18.8; // amount of time (secs) required to pump 1 mL
 
-float ReagentLineVolume = 0.60; // mL required to move an air bubble from the reagent valve to the sample valve
+// mL required to move an air bubble from the reagent valve to the sample valve.
+// STATUS (2026-08-21, mid-investigation — see KNOWN-ISSUES.md): 0.575 parks the
+// frozen front just inside the valve; a stepwise titration bracketed the true
+// valve-to-valve volume at ~0.60-0.655 (upper bound inflated by short-pulse pump
+// under-delivery); the 2026-08-20 flowing calibration said 0.60. Key finding: the
+// production split's line-to-line unevenness is NOT controlled by this value.
+float ReagentLineVolume = 0.575;
 
 float SampleLineVolume = 0.110; // sample line volume (mL): 35 in of 1/64" ID ETFE (McMaster 5583K51) at 3.14 uL/in
 float SampleNeedleVolume = 0.0427; // dispensation needle dead volume based on needle guage

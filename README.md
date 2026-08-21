@@ -13,6 +13,37 @@ The instrument runs one plate at a time: reagents are pumped from reservoirs
 through the reagent valve, split across the plate's wells by the dispensing
 valve, and pulled out through the aspiration valve under house vacuum.
 
+## Getting set up from zero
+
+```sh
+# 1. Toolchain (macOS: brew install arduino-cli; or see arduino.github.io/arduino-cli)
+arduino-cli core update-index
+arduino-cli core install arduino:mbed_giga     # the controller in use
+arduino-cli core install arduino:avr           # cross-compile check target
+
+# 2. Libraries (OttoPanel / display builds only)
+arduino-cli lib install Arduino_GigaDisplay_GFX Arduino_GigaDisplayTouch
+
+# 3. Python serial driving (tools/otto_console.py)
+python3 -m pip install pyserial
+
+# 4. Sanity check: everything should compile clean
+arduino-cli compile --fqbn arduino:mbed_giga:giga OttoPanel
+arduino-cli compile --fqbn arduino:avr:mega PreRunCalibrationScript
+```
+
+On a Mac with USB-C only, connect the GIGA **directly** to the laptop with a
+USB-C-to-USB-B cable — dock/monitor hubs silently swallow the serial device.
+The board shows up as `/dev/cu.usbmodem*` (never use `/dev/cu.debug-console`).
+
+Day-to-day, the firmware to have on the board is **`OttoPanel/`**: it exposes
+everything (calibration steps, the full run, bench utilities) through both the
+touchscreen and a remote serial console, so most work needs no reflashing.
+
+Wiring, valve addressing, and the fluidics build live in the master protocol
+document (`Otto3_Master_Protocol.html`, kept outside this repo); this README
+covers only what the firmware assumes.
+
 ## Repository layout
 
 | Path | What it is |
@@ -23,6 +54,10 @@ valve, and pulled out through the aspiration valve under house vacuum.
 | `PreRunCalibrationScript/` | **The single calibration entry point** — Steps 1–9, protocol documented in-line in the sketch |
 | `ShutdownScript/` | Post-run flush with water reservoirs, plus manual shutdown checklist |
 | `ValidationScripts/` | Hardware exercisers: sweep each valve through its ports, cycle the solenoid, run the pump |
+| `diagnostics/` | Tiny single-purpose bench sketches (pump/solenoid pulse tests, vacuum port scan, safe-state parkers, display smoke test) — see its README |
+| `tools/` | `otto_console.py` — drive OttoPanel's serial console from the shell: `tools/otto_console.py d a r b` runs a whole bench sequence |
+| `docs/` | `UI.md` / `UI.pdf` — how the touchscreen and serial console work, for operators |
+| `KNOWN-ISSUES.md` | **Read before calibrating**: open bugs and unresolved calibration findings, with the evidence behind each |
 | `MIGRATION_I2C.md` | Valve-control architecture: addressing, driver behavior (quiet window, bounded retries), bring-up procedure, build mechanics |
 
 ### How the shared library works
@@ -100,16 +135,32 @@ Two operational rules that are easy to get wrong:
 GIGA pin 32 drives an optocoupler relay input; the relay switches the 12 V
 solenoid loop. HIGH = solenoid open = vacuum applied.
 
-## Calibration workflow (`PreRunCalibrationScript/`)
+## Calibration workflow
 
-All calibrated values live in `OttoFns/constants.ino` (`mLPumpTime`, `vacTime`,
-`SampleLineVolume`, `SampleNeedleVolume`, `ReagentLineVolume`,
-`adjustSampleVolMicro`). The script is a ladder of nine steps; the full
-protocol — setup prerequisites, pass criteria per step, which constant each
-step tunes — is documented in-line in
+Calibration is a **once-per-screen** activity, not a per-run one: tune the
+constants at the start of a screening campaign (or after any plumbing change —
+new tubing, new needle, moved reservoirs), validate, and then run the screen
+on the frozen values. All calibrated values live in `OttoFns/constants.ino`
+(`mLPumpTime`, `vacTime`, `SampleLineVolume`, `SampleNeedleVolume`,
+`ReagentLineVolume`, `adjustSampleVolMicro`). The ladder is nine steps; the
+full protocol — setup prerequisites, pass criteria per step, which constant
+each step tunes — is documented in-line in
 [`PreRunCalibrationScript.ino`](PreRunCalibrationScript/PreRunCalibrationScript.ino).
 
-The loop for every step:
+**Before starting, read [KNOWN-ISSUES.md](KNOWN-ISSUES.md)** — Step 8 has
+unresolved findings that change how its results should be interpreted.
+
+There are two ways to run the steps:
+
+**A. OttoPanel (recommended — no reflashing between steps).** Flash
+`OttoPanel/` once; run steps from the touchscreen (CALIBRATION menu, with
+checklists) or the serial console (`1`–`9`, checklists skipped). Edit a
+constant in `constants.ino`, reflash OttoPanel, repeat. Step 5 also has an
+on-screen wizard that retunes `mLPumpTime` in RAM per pass. Step 8 has a
+dedicated stepwise toolkit (`b`/`u`/`m`/`M` — see [docs/UI.md](docs/UI.md)).
+
+**B. Flash-per-step (`PreRunCalibrationScript/`)** — the original method,
+still the fallback when the panel build is unavailable:
 
 1. **Uncomment exactly one step line** in the sketch (edit constants in
    `OttoFns/constants.ino` if the previous pass said to).
@@ -130,20 +181,38 @@ The line/needle dead volumes (`SampleLineVolume`, `SampleNeedleVolume`) are
 computed constants, not a numbered step — see the comment block between
 Steps 7 and 8 in the script.
 
-## Driving the bench with Claude Code / arduino-cli
+## Driving the bench from a shell (Claude Code / arduino-cli / tools)
 
-Everything is scriptable from a shell — no Arduino IDE required.
+Everything is scriptable — no Arduino IDE required.
 
 ```sh
 # Find the board (the GIGA appears as /dev/cu.usbmodem*)
 arduino-cli board list
 
-# Compile a sketch (any of the six sketch folders)
-arduino-cli compile --fqbn arduino:mbed_giga:giga PreRunCalibrationScript
+# Compile a sketch (any sketch folder)
+arduino-cli compile --fqbn arduino:mbed_giga:giga OttoPanel
 
-# Flash — NOTE: this also STARTS the run immediately
-arduino-cli upload -p <port> --fqbn arduino:mbed_giga:giga PreRunCalibrationScript
+# Flash — NOTE: for the flash-per-step sketches this STARTS the run
+# immediately; OttoPanel just boots to its menu (safe)
+arduino-cli upload -p <port> --fqbn arduino:mbed_giga:giga OttoPanel
 ```
+
+With OttoPanel flashed, `tools/otto_console.py` wraps the serial console —
+it auto-detects the port, sends commands one at a time, streams the
+`RUN:/STEP:/CUE:/DONE` phase markers, and refuses to race an active run:
+
+```sh
+tools/otto_console.py s            # status: state + live constants
+tools/otto_console.py d a r        # the clean regime before any reading
+tools/otto_console.py d a r b      # ...then park the calibration bubble
+tools/otto_console.py -i           # interactive prompt
+```
+
+The full command table is in [docs/UI.md](docs/UI.md) (or send `?` to the
+board). Two hard rules when driving remotely: **never flash while a run is
+active** (flashing reboots the board mid-motion), and **run the clean regime
+`d a r` before any calibration reading** (RESET LINE alone only cleans the
+reagent path and vent, not the six sample lines).
 
 Operational notes:
 
