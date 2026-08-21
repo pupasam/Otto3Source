@@ -241,7 +241,7 @@ void testSampleRuntime(int SampleWells[], float SampleLineTotalVolume, float mLP
 
 // will dispense 4mL total into sample well plate, then aspirate; runs 2X
 //conduct first with bleach water then pure water
-fullRinse(int WellLength, int SampleWells[], float mLPumpTime) {
+void fullRinse(int WellLength, int SampleWells[], float mLPumpTime) {
   
   RunPumpLine(WASH, 8, mLPumpTime);
   
@@ -314,7 +314,16 @@ void AddSBSReagentMulti(int WellLength, int SampleWells[], int VacuumWells[], Re
   if (bubbleIdx + 1 <= WellLength-1) {SelectVacuumPort(VacuumWells[bubbleIdx + 1]);} //vacuum next well
   else {SelectVacuumPort(VacEndPort);}
 
+  ottoCue("AIR BUBBLE ENTERING LINE NEXT", OTTO_CUE_CALM); // cue: air draw starts at the end of this segment
+
   RunPumpLine(reagentName, SampleWells[bubbleIdx], pumpTimeBeforeBubbleIdx);
+
+  // cue: the bubble's LEADING edge forms at the reagent valve the moment the
+  // AIR segment below starts, and enters the sample (dispensing) valve after
+  // ~ventRuntime seconds of pumping (ReagentLineVolume worth) - Step 8(a)
+  // watch window. Countdown T-0 = that arrival; screen strobes at T-0.
+  ottoCueArm("EYES ON DISP VALVE - FRONT ARRIVES",
+             (unsigned long)(ventRuntime * 1000.0f));
 
   RunPumpLine(AIR, SampleWells[bubbleIdx], AirTimeBubbleIdx);// + pumpTimeBeforeBubble); //dispense bubble to bubble well
 
@@ -354,7 +363,14 @@ void AddSBSReagentMulti(int WellLength, int SampleWells[], int VacuumWells[], Re
     RunPumpLine(WASH, SampleWells[w], BubbleTimePerSampleLine); //split bubble evenly between sample lines
   }
 
+  // cue: each purge segment below consumes ~SampleLineTotalVolume, pushing
+  // that line's bubble tail out through its needle - Step 8(b) watch window.
+  // One countdown per needle: T-0 (strobe) = end of that line's segment =
+  // the instant the tail should reach that needle hub.
+  static char otto_cueBuf[36];
   for (int ww=0; ww<WellLength; ww++) {
+    snprintf(otto_cueBuf, sizeof(otto_cueBuf), "RED AT NEEDLE %d", ww + 1);
+    ottoCueArm(otto_cueBuf, (unsigned long)(SamplePrimeRuntime * 1000.0f));
     RunPumpLine(WASH, SampleWells[ww], SamplePrimeRuntime); //purge remainder of sample line
   }
 
@@ -365,7 +381,9 @@ void AddSBSReagentMulti(int WellLength, int SampleWells[], int VacuumWells[], Re
 
 
 void AddSBSReagent(int WellLength, int SampleWells[], int VacuumWells[], Reagent reagentName, float SBSVol, float ReagentLineVentVolume, float SampleLineTotalVolume, int VentPort, float mLPumpTime, float VacTime, float AirTime, float FillTime, int VacStartPort, int VacEndPort) {
-  
+
+  ottoCue("PRIMING - NO NEED TO WATCH YET", OTTO_CUE_CALM); // cue: run start
+
   float ventRuntime = getPumpRuntime(ReagentLineVentVolume, mLPumpTime); // convert mL to seconds of runtime for vent
   float SBSWellRuntime = getPumpRuntime(SBSVol - SampleLineTotalVolume, mLPumpTime); // convert mL to seconds of pre-purge reagent runtime per well
   float SamplePrimeRuntime = getPumpRuntime(SampleLineTotalVolume, mLPumpTime); // convert mL to seconds of runtime for sample line
@@ -378,4 +396,8 @@ void AddSBSReagent(int WellLength, int SampleWells[], int VacuumWells[], Reagent
   else {
     AddSBSReagentShort(WellLength, SampleWells, VacuumWells, reagentName, SBSVol, ReagentLineVentVolume, SampleLineTotalVolume, VentPort, mLPumpTime, VacTime, AirTime, FillTime, VacStartPort, VacEndPort, ventRuntime);
   }
+
+  // cue: left up on purpose (no ottoCueClear) - it stays through stopLoop /
+  // the panel RESULT screen; the next ottoStepBegin retires it
+  ottoCue("DONE - CHECK WELLS: ~1 mL EACH, NO AIR", OTTO_CUE_CALM);
 }

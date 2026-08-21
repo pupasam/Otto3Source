@@ -2,13 +2,19 @@
 
 /////////////////////////// RUNTIME CONSTANTS YOU PROBABLY DO WANT TO EDIT/CHECK
 
-float mLPumpTime = 15.4; // amount of time (secs) required to pump 1 mL
+float mLPumpTime = 18.8; // amount of time (secs) required to pump 1 mL
 
-float ReagentLineVolume = 0.64; // mL required to move an air bubble from the reagent valve to the sample valve
+// mL required to move an air bubble from the reagent valve to the sample valve.
+// STATUS (2026-08-21, mid-investigation — see KNOWN-ISSUES.md): 0.575 parks the
+// frozen front just inside the valve; a stepwise titration bracketed the true
+// valve-to-valve volume at ~0.60-0.655 (upper bound inflated by short-pulse pump
+// under-delivery); the 2026-08-20 flowing calibration said 0.60. Key finding: the
+// production split's line-to-line unevenness is NOT controlled by this value.
+float ReagentLineVolume = 0.575;
 
-float SampleLineVolume = 0.25; // sample line volume (mL), calculated based on length (nearest inch) and ID of line
+float SampleLineVolume = 0.110; // sample line volume (mL): 35 in of 1/64" ID ETFE (McMaster 5583K51) at 3.14 uL/in
 float SampleNeedleVolume = 0.0427; // dispensation needle dead volume based on needle guage
-float adjustSampleVolMicro = 40; //in MICROliters -- can be +/-, final adjustment to calculated sample line volume such that addReagent has expected function
+float adjustSampleVolMicro = 0; //in MICROliters -- can be +/-, final adjustment to calculated sample line volume such that addReagent has expected function
 
 // SampleWells and VacuumWells reference the PORTS on the valve switchers corresponding to each well
 //length of SampleWells and VacuumWells MUST be the same
@@ -32,7 +38,7 @@ float airTime = 6; // amount of time (secs) for air bubble gap between sensitive
 float fillTime = 5; // amount of time (secs) needed to fully fill vacuum line at sample valve switch following line opening
 
 //vacTime should be between 7-15 seconds
-float vacTime = 12;//10.5; // amount of time (secs) required to fully aspirate a well of maximum input volume
+float vacTime = 15;//10.5; // amount of time (secs) required to fully aspirate a well of maximum input volume
 
 float SBSVolume = 0.99; // mL to dispense per well for SBS reagents // it will have SBSVolume - SampleNeedleVolume sitting in it for ~1min
 
@@ -59,10 +65,30 @@ int getReagentPort(Reagent r) {
   }
 }
 
+// Pump and solenoid stay on plain GPIO (they are NOT I2C valves).
 int SolenoidPin = 32;
 int PumpPin = 33;
-int ReagentPins[4] = {36, 37, 38, 39};
-int VacuumPins[4] = {42, 43, 44, 45};
-int SamplePins[4] = {48, 49, 50, 51};
+
+// ---- I2C selector-valve addressing (RheoLink / IDEX MX Series II) ----------
+// The three selector valves are now driven over I2C instead of 4-bit BCD GPIO.
+// Each value below is the 7-bit I2C address as printed by the i2c_scanner sketch.
+//
+// IMPORTANT: every valve must be given its own UNIQUE even 8-bit write address
+// BEFORE it goes on the shared bus, using the address_change sketch, one valve
+// at a time, followed by a power-cycle:
+//     factory 0x0E  -> 7-bit 0x07   (reagent, as shipped)
+//            0x10   -> 7-bit 0x08   (sample)
+//            0x12   -> 7-bit 0x09   (vacuum)
+// If you only have one addressed valve on the bench, temporarily point all three
+// constants at the same address to exercise the code path.
+uint8_t ReagentValveAddr7 = 0x07;
+uint8_t SampleValveAddr7  = 0x08;
+uint8_t VacuumValveAddr7  = 0x09;
+
+// MX Series II is a 10-position selector; ports are 1..10.
+const uint8_t VALVE_POS_MIN = 1;
+const uint8_t VALVE_POS_MAX = 10;
+// I2C bus speed. MUST be 100 kHz — 1 MHz hangs the RheoLink bus.
+const uint32_t VALVE_I2C_HZ = 100000;
 
 
