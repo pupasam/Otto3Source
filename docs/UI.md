@@ -11,7 +11,13 @@ the confirmation).
 
 ## 1. Touchscreen
 
+*The screens below are renderings generated from the firmware's own layout
+constants and colors (`OttoPanelUI.h` / `OttoDisplay.h`) — geometry-accurate
+mockups of the 800×480 shield, not photographs.*
+
 ### Home → menu → checklist → run
+
+![Home screen: CALIBRATION / RUN / UTILITIES](img/home.png)
 
 - **Home** shows three categories: **CALIBRATION** (steps 1–9),
   **RUN** (the full sequencing protocol), **UTILITIES** (primes, rinses,
@@ -19,12 +25,20 @@ the confirmation).
   inspection tests).
 - Tapping a category opens a **2-column button grid** (cell 1 is always
   `< BACK`).
+
+![CALIBRATION menu: BACK plus steps 1-9](img/menu_calibration.png)
+
 - Tapping an action opens its **pre-run checklist**: short physical
   prerequisites ("RESERVOIRS FULL", "PUMP ARMED (STOP AFTER KEYPAD USE)",
   "VACUUM OPEN, TRAP IN LINE, 12V ON", ...). Every row must be ticked
-  before **GO** enables. **CANCEL** returns to the menu.
+  before **GO** enables (it stays grey until then). **CANCEL** returns to
+  the menu.
+
+![Checklist screen for the split test, two boxes still unticked, GO disabled](img/checklist_splittest.png)
 
 ### The run screen
+
+![Run dashboard: four live panels, step timer with progress bar, red STOP column](img/run_dashboard.png)
 
 While an action runs, the display is a live dashboard:
 
@@ -44,11 +58,20 @@ While an action runs, the display is a live dashboard:
   new actions), then the instrument **parks safe** — pump stopped, vacuum
   solenoid closed, valves to reagent 4 / sample 1 / vacuum 1.
 
+When a cue is armed, the footer becomes the cue banner — amber and pulsing
+for watch cues, with a live countdown, and a triple full-screen strobe at
+T-0:
+
+![Run screen with the amber observation-cue banner replacing the footer](img/run_cue.png)
+
 ### The result screen
 
 When an action finishes, a **DONE** screen shows the measured duration and,
 for calibration tests, an inspection prompt (e.g. "INSPECT: AIR SLUG AT SAME
-SPOT IN ALL 6 LINES?"). Tap to return to the checklist/menu.
+SPOT IN ALL 6 LINES?"). Tap to return to the checklist/menu. (An aborted run
+shows a red ABORTED screen instead, with the stop time and the parked state.)
+
+![Result screen after the split test: DONE, measured time, inspection prompt](img/result_done.png)
 
 ### The Step 5 dispense wizard
 
