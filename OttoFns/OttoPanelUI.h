@@ -222,13 +222,19 @@ static unsigned long ottoActExpectedS(uint8_t i) {
       }
       return (unsigned long)s;
     }
-    case 21: {                                     // split test: prime + bubble
-      float v     = ReagentLineVolume * mLPumpTime;      // + settle + split
-      float chase = v - airTime;
-      if (chase < 0) chase = 0;
-      return (unsigned long)(v * 2 +
-                             WellLength * (SampleLineTotalVolume * mLPumpTime) * 1.2f +
-                             airTime + chase + 5 + airTime);
+    case 21: {                                     // split test: full production
+      // prefix of AddSBSReagentMulti through the split loop (~3 min):
+      // fill wait + vent prime + sample primes + first-well vac + the six
+      // well dispensations (totalPumpTime includes the air draw) + the
+      // interleaved addlVacTime holds + settle + split loop (= airTime)
+      float v    = ReagentLineVolume * mLPumpTime;
+      float sbsw = (SBSVolume - SampleLineTotalVolume) * mLPumpTime;
+      float sp   = SampleLineTotalVolume * mLPumpTime;
+      float fill = fillTime - v;    if (fill < 0) fill = 0;
+      float av   = vacTime - sbsw;  if (av < 0)   av = 0;
+      return (unsigned long)(fill + 2 * v + WellLength * sp * 1.2f +
+                             vacTime + WellLength * sbsw +
+                             (WellLength - 1) * av + 5 + airTime);
     }
     case 22:                                       // purge test: 6 purges + vent
       return (unsigned long)(WellLength * (SampleLineTotalVolume * mLPumpTime) +
@@ -243,28 +249,126 @@ static unsigned long ottoActExpectedS(uint8_t i) {
 // uses (ventRuntime = ReagentLineVolume*mLPumpTime, SamplePrimeRuntime =
 // SampleLineTotalVolume*mLPumpTime), evaluated when the test runs.
 
-// A) Reproduce the state at the END of the bubble-split phase, then stop:
-// prime vent + all sample lines, draw the bubble + chase it to the sample
-// valve, settle, run the VERBATIM descending split loop. No purge — the
-// operator inspects the parked air slugs.
+// A) Reproduce the state at the END of the bubble-split phase with FULL
+// production fidelity, then stop for inspection instead of purging.
+//
+// verbatim prefix of AddSBSReagentMulti - keep in step if that function
+// changes. Runs the real thing: vacuum choreography, INCORPORATION reagent
+// priming of vent + all sample lines, the six ascending well dispensations
+// with the interleaved air draw (production cues/countdowns included via
+// the copied lines), bubbleIdx spanning logic, final-well handling, the
+// settle, and the 7->2 descending split loop - then parks (no purge).
+// Runtimes come from the same expressions as AddSBSReagent's dispatcher,
+// so bubbleIdx lands exactly where production puts it.
 static void ottoCalSplitTest() {
-  float ventRuntime       = ReagentLineVolume * mLPumpTime;
-  float SamplePrimeRuntime = SampleLineTotalVolume * mLPumpTime;
-  // 1. prime vent + all 6 sample lines with WASH (Multi's prime volumes)
-  RunPumpLine(WASH, VentPort, ventRuntime * 2);
-  for (int w = 0; w < WellLength; w++) {
-    RunPumpLine(WASH, SampleWells[w], SamplePrimeRuntime * 1.2);
+  // --- dispatcher expressions (AddSBSReagent), INCORPORATION as reagent ---
+  Reagent reagentName = INCORPORATION;
+  float ventRuntime = getPumpRuntime(ReagentLineVolume, mLPumpTime);
+  float SBSWellRuntime = getPumpRuntime(SBSVolume - SampleLineTotalVolume, mLPumpTime);
+  float SamplePrimeRuntime = getPumpRuntime(SampleLineTotalVolume, mLPumpTime);
+  float totalPumpTime = SBSWellRuntime * WellLength;
+  float pumpTimeBeforeBubble = totalPumpTime - ventRuntime;
+  (void)totalPumpTime;
+  // --- production parameter names used below ---
+  float AirTime = airTime, FillTime = fillTime, VacTime = vacTime;
+  int VacStartPort = SafeVacA, VacEndPort = SafeVacB;
+
+  ottoCue("PRIMING - NO NEED TO WATCH YET", OTTO_CUE_CALM); // wrapper cue
+
+  // ======================= verbatim prefix begins ==========================
+  float BubbleTimePerSampleLine = AirTime/WellLength; // dividing up the bubble between the sample lines
+  int bubbleIdx = (int)floor(max(0,pumpTimeBeforeBubble)/SBSWellRuntime);
+  float AirTimeBubbleIdx = AirTime;
+  float pumpTimeBeforeBubbleIdx = ((pumpTimeBeforeBubble/SBSWellRuntime) - bubbleIdx) * SBSWellRuntime; // remainder of pump time
+  float pumpTimeAfterBubbleIdx = SBSWellRuntime - AirTime - pumpTimeBeforeBubbleIdx;
+
+  float bubbleTimeNextIdx;
+  float pumpTimeNextIdx;
+
+  float addlVacTime = max(VacTime-SBSWellRuntime,0); //we are pumping our initial reagent prime into existing fluid so need to vac for the whole time
+
+  if (pumpTimeAfterBubbleIdx <= 0) { //we run the bubble spanned across 2 idx's
+    bubbleTimeNextIdx = pumpTimeAfterBubbleIdx * -1;
+    pumpTimeNextIdx = SBSWellRuntime - bubbleTimeNextIdx;
+    AirTimeBubbleIdx = AirTime - bubbleTimeNextIdx;
   }
-  // 2. bubble + chase, exactly as production draws it
-  RunPumpLine(AIR, VentPort, airTime);
-  RunPumpLine(WASH, VentPort, max(0, ventRuntime - airTime));
-  // 3. settle with the bubble parked at the sample valve
-  Wait(5);
-  // 4. verbatim descending split loop (AddSBSReagentMulti)
-  for (int w = WellLength - 1; w >= 0; w--) {
-    RunPumpLine(WASH, SampleWells[w], airTime / WellLength);
+
+  // set up vacuum line
+  SelectVacuumPort(VacStartPort);
+  OpenVacuumLine();
+  Wait(max(0, FillTime-ventRuntime)); // wait for any necessary fill
+
+  // we want to purge the old stuck reagent all the way through the line
+  RunPumpLine(reagentName, VentPort, ventRuntime*2); //prime reagent line with > ventRuntime to ensure completion
+
+  for (int w = 0; w<WellLength; w++) {
+    RunPumpLine(reagentName, SampleWells[w], SamplePrimeRuntime * 1.2); //prime sample lines with a little extra to make sure
   }
-  // 5. no purge — stop here for inspection (pump already off, no solenoid)
+
+  SelectSamplePort(SampleWells[0]); //select first well
+  SelectVacuumPort(VacuumWells[0]); //vacuum first well
+  Wait(VacTime);
+
+  for (int i = 0; i<bubbleIdx; i++) {
+    SelectVacuumPort(VacuumWells[i + 1]); //vacuum next well
+    RunPumpLine(reagentName, SampleWells[i], SBSWellRuntime); //dispense to current well
+    Wait(addlVacTime); //finish vacuuming
+  }
+
+  if (bubbleIdx + 1 <= WellLength-1) {SelectVacuumPort(VacuumWells[bubbleIdx + 1]);} //vacuum next well
+  else {SelectVacuumPort(VacEndPort);}
+
+  ottoCue("AIR BUBBLE ENTERING LINE NEXT", OTTO_CUE_CALM); // cue: air draw starts at the end of this segment
+
+  RunPumpLine(reagentName, SampleWells[bubbleIdx], pumpTimeBeforeBubbleIdx);
+
+  ottoCueArm("EYES ON DISP VALVE - FRONT ARRIVES",
+             (unsigned long)(ventRuntime * 1000.0f));
+
+  RunPumpLine(AIR, SampleWells[bubbleIdx], AirTimeBubbleIdx);// + pumpTimeBeforeBubble); //dispense bubble to bubble well
+
+  // if the bubble concludes vs extends over multiple wells
+  int continueIdx;
+  if (pumpTimeAfterBubbleIdx > 0) {
+    continueIdx = 0;
+      RunPumpLine(WASH, SampleWells[bubbleIdx], pumpTimeAfterBubbleIdx); //dispense post-bubble wash to bubble well
+      Wait(addlVacTime); //finish vacuuming bubble well
+    }
+  else {
+    continueIdx = 1;
+    Wait(addlVacTime); //finish vacuuming bubble well
+    if (bubbleIdx + 2 <= WellLength-1) {SelectVacuumPort(VacuumWells[bubbleIdx + 2]);} //vacuum next well
+    else {SelectVacuumPort(VacEndPort);}
+    RunPumpLine(AIR, SampleWells[bubbleIdx + 1], bubbleTimeNextIdx); // dispense remaining bubble
+    RunPumpLine(WASH, SampleWells[bubbleIdx + 1], pumpTimeNextIdx); // dispense rest of wash well
+    if (bubbleIdx + 2 <= WellLength-1) {Wait(addlVacTime);} //finish vacuuming after bubble well
+  }
+
+  // wells after bubble well excepting last well
+  for (int ii = bubbleIdx + 1 + continueIdx; ii<WellLength-1; ii++) {
+    Serial.print("simple wells after complex well ");Serial.println(ii);
+    SelectVacuumPort(VacuumWells[ii + 1]); //vacuum next well
+    RunPumpLine(WASH, SampleWells[ii], SBSWellRuntime); //dispense to current well
+    Wait(addlVacTime); //finish vacuuming
+  }
+
+  SelectVacuumPort(VacEndPort);
+  CloseVacuumLine();
+  if ((bubbleIdx + 1) < WellLength-1) {
+    RunPumpLine(WASH, SampleWells[WellLength-1], SBSWellRuntime);} //dispense to final well with wash
+
+  Wait(5); // let bubble settle
+
+  for (int w=WellLength-1; w>=0; w--) {
+    RunPumpLine(WASH, SampleWells[w], BubbleTimePerSampleLine); //split bubble evenly between sample lines
+  }
+  // ======================== verbatim prefix ends ===========================
+
+  // STOP instead of purging: park for still-line inspection.
+  StopPump();
+  CloseVacuumLine();
+  SelectSamplePort(1);   // park (port 1 unplumbed)
+  SelectVacuumPort(1);   // park
 }
 
 // B) The VERBATIM ascending purge loop only (run right after the split
@@ -342,6 +446,12 @@ static const char* ottoActResultNote(uint8_t i) {
   return nullptr;
 }
 
+// Optional second DONE-screen line (below the first note).
+static const char* ottoActResultNote2(uint8_t i) {
+  if (i == 21) return "WELLS ~1 mL EACH";
+  return nullptr;
+}
+
 // Pre-run checklists, from the calibration script's SETUP banner + README
 // operational rules (SHUTDOWN FLUSH: water reservoirs, per ShutdownScript).
 // Short texts, drawn big; GO stays disabled until every row is checked.
@@ -365,11 +475,13 @@ static uint8_t ottoActChecklist(uint8_t i, const char** items) {
       items[1] = "PORT 6 (AIR) DRY - NO TUBING";
       items[2] = OTTO_CK_PUMP;
       return 3;
-    case 21:                                      // split test (no vacuum)
-      items[0] = "WASH RESERVOIR LOADED";
-      items[1] = "PORT 6 (AIR) DRY - NO TUBING";
-      items[2] = OTTO_CK_PUMP;
-      return 3;
+    case 21:                                      // split test: full production
+      items[0] = "PR2 IN ALL REAGENT SLOTS";
+      items[1] = OTTO_CK_MANI;
+      items[2] = OTTO_CK_VAC;
+      items[3] = "PORT 6 (AIR) DRY - NO TUBING";
+      items[4] = OTTO_CK_PUMP;
+      return 5;
     case 22:                                      // purge test (no vacuum)
       items[0] = "RUN IMMEDIATELY AFTER CAL: SPLIT TEST";
       items[1] = "WASH RESERVOIR LOADED";
@@ -886,6 +998,8 @@ static void ottoUiDrawResult() {
       uint8_t nsz = otto_fitSize(note, OTTO_SCR_W - 2 * OTTO_MARGIN, 3);
       otto_centerIn(note, 0, OTTO_SCR_W, 350, nsz, OTTO_COL_AMBER);
     }
+    const char* note2 = ottoActResultNote2(ottoUiSel);
+    if (note2) otto_centerIn(note2, 0, OTTO_SCR_W, 396, 2, OTTO_COL_AMBER);
     otto_centerIn("TOUCH SCREEN TO RETURN TO MENU", 0, OTTO_SCR_W, 440, 2,
                   OTTO_COL_GREY);
   }
